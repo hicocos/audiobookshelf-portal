@@ -7,11 +7,11 @@
 ## 1. 第四步最终确认
 
 - 已生成 `.hermes/step4-remediation-evidence-2026-07-17.md`。
-- 最终构建注入 Git revision `6a1116b5f3a2`，不再为 unknown。
-- API/Worker 同一运行镜像 digest：`sha256:4e1c73b893ebca0fbfaf8a9a7752d3fdf09787cd85dff03acd365ddfc18864f4`。
-- Bot digest：`sha256:334aa001eadc7d08aa872a1993c4531bc644dbb50a72679a453878ea1df6fc8e`。
-- Web digest：`sha256:3d8510cbc4990ae98f7885e6776c43f496a8273127b9d8c6e1e5b39a30643f5e`。
-- Phase 4 四个服务重建后均 healthy；ABS 亦 healthy。
+- 最终构建注入已提交 Git revision `13585bfc8b40`。
+- API/Worker 同一运行镜像 digest：`sha256:4d124fc2e8433f0d95ef1f504b662807e2291995330dd3076cf0682f33074547`。
+- Bot digest：`sha256:c7264ef1810d1e1d4f3607bcba176cc14d3b71eeb2314a1dc74a8c42ef9165cb`。
+- Web digest：`sha256:e3867db637a2897620ec361a7af5fcc95d3ad24d813101382d53ea85a693d99a`。
+- 最终发布版本标签为 `phase4-final`；Phase 4 四个服务重建后均 healthy；ABS 亦 healthy。
 
 ## 2. 自动化质量门禁
 
