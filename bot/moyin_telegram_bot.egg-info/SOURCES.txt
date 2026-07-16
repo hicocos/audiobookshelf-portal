@@ -1,7 +1,0 @@
-pyproject.toml
-moyin_telegram_bot.egg-info/PKG-INFO
-moyin_telegram_bot.egg-info/SOURCES.txt
-moyin_telegram_bot.egg-info/dependency_links.txt
-moyin_telegram_bot.egg-info/requires.txt
-moyin_telegram_bot.egg-info/top_level.txt
-tests/test_handlers.py
