@@ -1,0 +1,181 @@
+{
+  "count": 24,
+  "image_base_url": "https://img.xmu.la/v1",
+  "model": "gpt-image-2",
+  "sizes": [
+    [
+      1024,
+      1024
+    ]
+  ],
+  "items": [
+    {
+      "file": "/anime/generated/audio_book_crystal.png",
+      "name": "audio_book_crystal",
+      "width": 1024,
+      "height": 1024,
+      "bytes": 1369709
+    },
+    {
+      "file": "/anime/generated/audio_compass.png",
+      "name": "audio_compass",
+      "width": 1024,
+      "height": 1024,
+      "bytes": 1991363
+    },
+    {
+      "file": "/anime/generated/book_stack_glow.png",
+      "name": "book_stack_glow",
+      "width": 1024,
+      "height": 1024,
+      "bytes": 2021480
+    },
+    {
+      "file": "/anime/generated/chibi_admin_robot.png",
+      "name": "chibi_admin_robot",
+      "width": 1024,
+      "height": 1024,
+      "bytes": 1348296
+    },
+    {
+      "file": "/anime/generated/chibi_sleepy_listener.png",
+      "name": "chibi_sleepy_listener",
+      "width": 1024,
+      "height": 1024,
+      "bytes": 1934729
+    },
+    {
+      "file": "/anime/generated/cloud_audio_server.png",
+      "name": "cloud_audio_server",
+      "width": 1024,
+      "height": 1024,
+      "bytes": 1842762
+    },
+    {
+      "file": "/anime/generated/desktop_client_monitor.png",
+      "name": "desktop_client_monitor",
+      "width": 1024,
+      "height": 1024,
+      "bytes": 1350921
+    },
+    {
+      "file": "/anime/generated/floating_cassette_charm.png",
+      "name": "floating_cassette_charm",
+      "width": 1024,
+      "height": 1024,
+      "bytes": 1520082
+    },
+    {
+      "file": "/anime/generated/floating_music_island.png",
+      "name": "floating_music_island",
+      "width": 1024,
+      "height": 1024,
+      "bytes": 2041802
+    },
+    {
+      "file": "/anime/generated/footer_mascot_chibi.png",
+      "name": "footer_mascot_chibi",
+      "width": 1024,
+      "height": 1024,
+      "bytes": 1609846
+    },
+    {
+      "file": "/anime/generated/headphone_cat_spirit.png",
+      "name": "headphone_cat_spirit",
+      "width": 1024,
+      "height": 1024,
+      "bytes": 1409131
+    },
+    {
+      "file": "/anime/generated/keycard_access.png",
+      "name": "keycard_access",
+      "width": 1024,
+      "height": 1024,
+      "bytes": 1534823
+    },
+    {
+      "file": "/anime/generated/library_orb.png",
+      "name": "library_orb",
+      "width": 1024,
+      "height": 1024,
+      "bytes": 1827640
+    },
+    {
+      "file": "/anime/generated/mascot_headphones_girl.png",
+      "name": "mascot_headphones_girl",
+      "width": 1024,
+      "height": 1024,
+      "bytes": 1514325
+    },
+    {
+      "file": "/anime/generated/mascot_reading_float.png",
+      "name": "mascot_reading_float",
+      "width": 1024,
+      "height": 1024,
+      "bytes": 1463833
+    },
+    {
+      "file": "/anime/generated/mobile_client_phone.png",
+      "name": "mobile_client_phone",
+      "width": 1024,
+      "height": 1024,
+      "bytes": 1411979
+    },
+    {
+      "file": "/anime/generated/neon_headphones_icon.png",
+      "name": "neon_headphones_icon",
+      "width": 1024,
+      "height": 1024,
+      "bytes": 1492086
+    },
+    {
+      "file": "/anime/generated/notification_bell_magic.png",
+      "name": "notification_bell_magic",
+      "width": 1024,
+      "height": 1024,
+      "bytes": 1796420
+    },
+    {
+      "file": "/anime/generated/progress_ring_gem.png",
+      "name": "progress_ring_gem",
+      "width": 1024,
+      "height": 1024,
+      "bytes": 1377435
+    },
+    {
+      "file": "/anime/generated/renewal_ticket_magic.png",
+      "name": "renewal_ticket_magic",
+      "width": 1024,
+      "height": 1024,
+      "bytes": 1424914
+    },
+    {
+      "file": "/anime/generated/shield_audio_access.png",
+      "name": "shield_audio_access",
+      "width": 1024,
+      "height": 1024,
+      "bytes": 1429597
+    },
+    {
+      "file": "/anime/generated/soundwave_wing.png",
+      "name": "soundwave_wing",
+      "width": 1024,
+      "height": 1024,
+      "bytes": 1412969
+    },
+    {
+      "file": "/anime/generated/star_microchip.png",
+      "name": "star_microchip",
+      "width": 1024,
+      "height": 1024,
+      "bytes": 1951566
+    },
+    {
+      "file": "/anime/generated/wave_dragon.png",
+      "name": "wave_dragon",
+      "width": 1024,
+      "height": 1024,
+      "bytes": 1868534
+    }
+  ]
+}

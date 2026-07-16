@@ -1,0 +1,27 @@
+# MoYin.CC generated anime assets
+
+- `/anime/generated/star_microchip.png` — star_microchip
+- `/anime/generated/floating_music_island.png` — floating_music_island
+- `/anime/generated/chibi_sleepy_listener.png` — chibi_sleepy_listener
+- `/anime/generated/wave_dragon.png` — wave_dragon
+- `/anime/generated/audio_compass.png` — audio_compass
+- `/anime/generated/keycard_access.png` — keycard_access
+- `/anime/generated/book_stack_glow.png` — book_stack_glow
+- `/anime/generated/notification_bell_magic.png` — notification_bell_magic
+- `/anime/generated/cloud_audio_server.png` — cloud_audio_server
+- `/anime/generated/footer_mascot_chibi.png` — footer_mascot_chibi
+- `/anime/generated/audio_book_crystal.png` — audio_book_crystal
+- `/anime/generated/chibi_admin_robot.png` — chibi_admin_robot
+- `/anime/generated/desktop_client_monitor.png` — desktop_client_monitor
+- `/anime/generated/floating_cassette_charm.png` — floating_cassette_charm
+- `/anime/generated/headphone_cat_spirit.png` — headphone_cat_spirit
+- `/anime/generated/library_orb.png` — library_orb
+- `/anime/generated/mascot_headphones_girl.png` — mascot_headphones_girl
+- `/anime/generated/mascot_reading_float.png` — mascot_reading_float
+- `/anime/generated/mobile_client_phone.png` — mobile_client_phone
+- `/anime/generated/neon_headphones_icon.png` — neon_headphones_icon
+- `/anime/generated/progress_ring_gem.png` — progress_ring_gem
+- `/anime/generated/renewal_ticket_magic.png` — renewal_ticket_magic
+- `/anime/generated/shield_audio_access.png` — shield_audio_access
+- `/anime/generated/soundwave_wing.png` — soundwave_wing
+- `/anime/generated/test-single.png` — test-single

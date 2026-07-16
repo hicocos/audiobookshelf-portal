@@ -1,0 +1,44 @@
+# Secrets and local runtime configuration
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Databases and runtime data
+/data/
+*.db
+*.db-*
+*.sqlite
+*.sqlite-*
+*.sqlite3
+*.sqlite3-*
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.venv/
+
+# Node / Next
+node_modules/
+.next/
+out/
+dist/
+coverage/
+playwright-report/
+test-results/
+
+# Local rollback/archive/build artifacts (not source control)
+.hermes/rollback/
+backups/
+_web_backups_archive/
+*.tar
+*.tar.gz
+*.tgz
+
+# Logs and OS/editor state
+*.log
+.DS_Store

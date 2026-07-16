@@ -1,0 +1,118 @@
+import pytest
+from sqlalchemy import text
+from sqlmodel import create_engine
+from sqlalchemy.pool import StaticPool
+
+from app.db_migrations import run_migrations
+
+
+def _legacy_engine():
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    with engine.begin() as conn:
+        conn.exec_driver_sql(
+            """
+            CREATE TABLE portal_users (
+                id VARCHAR PRIMARY KEY,
+                username VARCHAR NOT NULL,
+                password_hash VARCHAR NOT NULL,
+                email VARCHAR,
+                telegram_id VARCHAR,
+                role VARCHAR NOT NULL DEFAULT 'user',
+                status VARCHAR NOT NULL DEFAULT 'active',
+                abs_user_id VARCHAR,
+                abs_username VARCHAR NOT NULL,
+                expires_at DATETIME,
+                created_at DATETIME NOT NULL,
+                updated_at DATETIME NOT NULL,
+                last_login_at DATETIME
+            )
+            """
+        )
+    return engine
+
+
+def _columns(engine, table_name: str) -> set[str]:
+    with engine.connect() as conn:
+        return {row[1] for row in conn.exec_driver_sql(f"PRAGMA table_info({table_name})")}
+
+
+def _indexes(engine, table_name: str) -> set[str]:
+    with engine.connect() as conn:
+        return {row[1] for row in conn.exec_driver_sql(f"PRAGMA index_list({table_name})")}
+
+
+def test_migrations_add_telegram_columns_table_and_unique_index_to_legacy_database():
+    engine = _legacy_engine()
+
+    run_migrations(engine)
+
+    portal_columns = _columns(engine, "portal_users")
+    assert "telegram_username" in portal_columns
+    assert "telegram_bound_at" in portal_columns
+
+    token_columns = _columns(engine, "telegram_bind_tokens")
+    assert {
+        "id",
+        "portal_user_id",
+        "code_hash",
+        "expires_at",
+        "used_at",
+        "failed_attempts",
+        "created_at",
+    }.issubset(token_columns)
+
+    assert "ux_portal_users_telegram_id" in _indexes(engine, "portal_users")
+    assert "ux_telegram_bind_tokens_code_hash" in _indexes(engine, "telegram_bind_tokens")
+
+
+def test_migrations_are_idempotent():
+    engine = _legacy_engine()
+
+    run_migrations(engine)
+    run_migrations(engine)
+
+    assert "telegram_username" in _columns(engine, "portal_users")
+    assert "telegram_bound_at" in _columns(engine, "portal_users")
+
+
+def test_telegram_id_unique_index_allows_multiple_nulls_but_rejects_duplicate_values():
+    engine = _legacy_engine()
+    run_migrations(engine)
+
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                """
+                INSERT INTO portal_users
+                (id, username, password_hash, telegram_id, role, status, abs_username, created_at, updated_at)
+                VALUES
+                ('u1', 'alice', 'hash', NULL, 'user', 'active', 'alice', '2026-01-01', '2026-01-01'),
+                ('u2', 'bob', 'hash', NULL, 'user', 'active', 'bob', '2026-01-01', '2026-01-01')
+                """
+            )
+        )
+        conn.execute(
+            text(
+                """
+                INSERT INTO portal_users
+                (id, username, password_hash, telegram_id, role, status, abs_username, created_at, updated_at)
+                VALUES
+                ('u3', 'charlie', 'hash', '12345', 'user', 'active', 'charlie', '2026-01-01', '2026-01-01')
+                """
+            )
+        )
+        with pytest.raises(Exception):
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO portal_users
+                    (id, username, password_hash, telegram_id, role, status, abs_username, created_at, updated_at)
+                    VALUES
+                    ('u4', 'dave', 'hash', '12345', 'user', 'active', 'dave', '2026-01-01', '2026-01-01')
+                    """
+                )
+            )

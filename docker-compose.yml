@@ -1,0 +1,194 @@
+services:
+  audiobookshelf:
+    image: ghcr.io/advplyr/audiobookshelf@sha256:1eef6716183c52abafe5405e7d6be8390248ecd59c7488c44af871757ac8fc4d
+    container_name: audiobookshelf
+    restart: unless-stopped
+    init: true
+    stop_grace_period: 60s
+    environment:
+      TZ: Asia/Shanghai
+      TINI_SUBREAPER: "1"
+    volumes:
+      - /www/wwwroot/audiobook/config:/config
+      - /www/wwwroot/audiobook/metadata:/metadata
+      - /www/wwwroot/books:/audiobooks
+      - /www/podcasts:/podcasts
+    ports:
+      - "127.0.0.1:13268:80"
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1/ping').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    logging: &default-logging
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+    mem_limit: 2g
+    mem_reservation: 256m
+    cpus: 2.0
+    pids_limit: 256
+    security_opt:
+      - no-new-privileges:true
+
+  moyin-api:
+    image: audiobookshelf-portal-backend:step3
+    build: ./backend
+    container_name: moyin-api
+    restart: unless-stopped
+    init: true
+    stop_grace_period: 30s
+    env_file: .env.api
+    environment:
+      TZ: Asia/Shanghai
+    volumes:
+      - moyin-data:/data
+    ports:
+      - "${API_BIND:-127.0.0.1}:${API_PORT:-8019}:8000"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/public/health/ready', timeout=5).read()"
+      interval: 30s
+      timeout: 8s
+      retries: 3
+      start_period: 30s
+    logging: *default-logging
+    mem_limit: 512m
+    mem_reservation: 96m
+    cpus: 1.0
+    pids_limit: 128
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+
+  moyin-worker:
+    image: audiobookshelf-portal-backend:step3
+    build: ./backend
+    container_name: moyin-worker
+    restart: unless-stopped
+    init: true
+    stop_grace_period: 60s
+    env_file: .env.worker
+    environment:
+      TZ: Asia/Shanghai
+    volumes:
+      - moyin-data:/data
+    command: ["python", "-m", "app.worker", "--interval", "300"]
+    depends_on:
+      moyin-api:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "from app.worker_health import check_worker_health; check_worker_health()"
+      interval: 60s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+    logging: *default-logging
+    mem_limit: 512m
+    mem_reservation: 96m
+    cpus: 1.0
+    pids_limit: 128
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+
+  moyin-web:
+    build:
+      context: ./web
+      args:
+        NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-http://localhost:8019}
+    container_name: moyin-web
+    restart: unless-stopped
+    init: true
+    stop_grace_period: 30s
+    environment:
+      PORT: 3009
+      NODE_ENV: production
+      NEXT_TELEMETRY_DISABLED: "1"
+      TZ: Asia/Shanghai
+    ports:
+      - "${WEB_BIND:-127.0.0.1}:${WEB_PORT:-3009}:3009"
+    depends_on:
+      moyin-api:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "const os=require('os');fetch('http://'+os.hostname()+':3009/').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    logging: *default-logging
+    mem_limit: 512m
+    mem_reservation: 96m
+    cpus: 1.0
+    pids_limit: 128
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+
+  moyin-bot:
+    build: ./bot
+    container_name: moyin-bot
+    restart: unless-stopped
+    init: true
+    stop_grace_period: 30s
+    env_file: .env.bot
+    environment:
+      TZ: Asia/Shanghai
+    depends_on:
+      moyin-api:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import os,urllib.request; req=urllib.request.Request(os.environ['WEB_INTERNAL_API_BASE'].rstrip('/') + '/api/public/health/live'); urllib.request.urlopen(req, timeout=5).read()"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    logging: *default-logging
+    mem_limit: 384m
+    mem_reservation: 64m
+    cpus: 0.75
+    pids_limit: 96
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=32m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+
+volumes:
+  moyin-data:
