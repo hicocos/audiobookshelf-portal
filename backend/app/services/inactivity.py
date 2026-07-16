@@ -72,7 +72,7 @@ def should_disable_for_inactivity(
     latest = latest_listen_at(upstream_user)
     inactive_cutoff = now - timedelta(days=max(inactive_days, 1))
     if latest is None:
-        return True, f"超过宽限期后仍没有任何收听记录"
+        return True, "超过宽限期后仍没有任何收听记录"
     if latest < inactive_cutoff:
         return True, f"最近收听时间超过 {inactive_days} 天"
     return False, "最近一个周期内有收听记录"

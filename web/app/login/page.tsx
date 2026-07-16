@@ -6,6 +6,7 @@ import { ArrowRight, KeyRound, LifeBuoy, Lock, User } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { Button, LoadingScreen, ShellBackdrop, StatusNote, WordMark } from '@/components/ui';
 import { api, PublicSettings } from '@/lib/api';
+import { getSafeDashboardRedirect } from '@/lib/navigation';
 
 export default function LoginPage() {
   const router = useRouter();
@@ -24,7 +25,7 @@ export default function LoginPage() {
       await api.login(username.trim(), password);
       setEntering(true);
       const next = new URLSearchParams(window.location.search).get('next') || '/dashboard';
-      const safeNext = next === '/dashboard' || next.startsWith('/dashboard/') ? next : '/dashboard';
+      const safeNext = getSafeDashboardRedirect(next);
       setTimeout(() => router.push(safeNext), 450);
     } catch (err) { setMessage(err instanceof Error ? err.message : '登录失败'); setLoading(false); }
   }

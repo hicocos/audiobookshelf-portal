@@ -157,7 +157,6 @@ async def register(
     session: Session = Depends(get_session),
     abs_factory: Any = Depends(get_abs_client_factory),
 ) -> dict[str, Any]:
-    settings = Settings()
     telegram_id = payload.telegramId.strip()
     _ensure_public_registration_allowed(session, telegram_id)
 

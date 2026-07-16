@@ -1,7 +1,6 @@
 from datetime import timedelta
 
 import pytest
-from sqlalchemy.exc import IntegrityError
 from sqlalchemy.pool import StaticPool
 from sqlmodel import Session, SQLModel, create_engine, select
 
@@ -14,7 +13,6 @@ from app.services.telegram_binding import (
     create_bind_token,
     get_user_by_telegram_id,
     hash_bind_code,
-    normalize_bind_code,
     unbind_telegram_user,
 )
 

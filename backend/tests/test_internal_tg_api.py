@@ -2,7 +2,7 @@ from datetime import timedelta
 
 from fastapi.testclient import TestClient
 from sqlalchemy.pool import StaticPool
-from sqlmodel import Session, SQLModel, create_engine
+from sqlmodel import Session, SQLModel, create_engine, select
 
 from app.db import get_session
 from app.main import app
@@ -252,7 +252,7 @@ def test_internal_register_creates_portal_and_abs_user_bound_to_telegram(monkeyp
             assert saved is not None
             assert saved.telegram_id == "987654321"
             assert saved.telegram_username == "alice_tg"
-            code = session.get(Code, session.query(Code).filter(Code.code == "INVITE-TG").first().id)
+            code = session.exec(select(Code).where(Code.code == "INVITE-TG")).one()
             assert code.used_count == 1
     finally:
         teardown_client()

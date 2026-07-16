@@ -1,3 +1,13 @@
+x-build-args: &build-args
+  BUILD_VERSION: ${BUILD_VERSION:-dev}
+  BUILD_COMMIT: ${BUILD_COMMIT:-unknown}
+  BUILD_DATE: ${BUILD_DATE:-unknown}
+
+x-build-labels: &build-labels
+  org.opencontainers.image.version: ${BUILD_VERSION:-dev}
+  org.opencontainers.image.revision: ${BUILD_COMMIT:-unknown}
+  org.opencontainers.image.created: ${BUILD_DATE:-unknown}
+
 services:
   audiobookshelf:
     image: ghcr.io/advplyr/audiobookshelf@sha256:1eef6716183c52abafe5405e7d6be8390248ecd59c7488c44af871757ac8fc4d
@@ -38,8 +48,11 @@ services:
       - no-new-privileges:true
 
   moyin-api:
-    image: audiobookshelf-portal-backend:step3
-    build: ./backend
+    image: audiobookshelf-portal-backend:${BUILD_VERSION:-dev}
+    build:
+      context: ./backend
+      args: *build-args
+      labels: *build-labels
     container_name: moyin-api
     restart: unless-stopped
     init: true
@@ -75,8 +88,11 @@ services:
       - no-new-privileges:true
 
   moyin-worker:
-    image: audiobookshelf-portal-backend:step3
-    build: ./backend
+    image: audiobookshelf-portal-backend:${BUILD_VERSION:-dev}
+    build:
+      context: ./backend
+      args: *build-args
+      labels: *build-labels
     container_name: moyin-worker
     restart: unless-stopped
     init: true
@@ -118,6 +134,8 @@ services:
       context: ./web
       args:
         NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-http://localhost:8019}
+        <<: *build-args
+      labels: *build-labels
     container_name: moyin-web
     restart: unless-stopped
     init: true
@@ -156,7 +174,10 @@ services:
       - no-new-privileges:true
 
   moyin-bot:
-    build: ./bot
+    build:
+      context: ./bot
+      args: *build-args
+      labels: *build-labels
     container_name: moyin-bot
     restart: unless-stopped
     init: true

@@ -2,7 +2,7 @@
 
 import { CheckCircle2, Loader2, Bell, Megaphone, X, Sparkles } from 'lucide-react';
 import { ButtonHTMLAttributes, ReactNode, useEffect, useState } from 'react';
-import { createPortal } from 'react-dom';
+import { AccessibleModal } from '@/components/accessible-modal';
 
 export function ShellBackdrop({ children, className = '' }: { children: ReactNode; className?: string }) {
   return (
@@ -77,22 +77,14 @@ export function StatusNote({ children, tone = 'neutral' }: { children: ReactNode
 }
 
 export function PromptModal({ title, body, onClose, confirmText = '我知道了' }: { title: string; body: ReactNode; onClose: () => void; confirmText?: string }) {
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
-    window.addEventListener('keydown', onKey);
-    document.body.style.overflow = 'hidden';
-    return () => { window.removeEventListener('keydown', onKey); document.body.style.overflow = ''; };
-  }, [onClose]);
   return (
-    <div className="prompt-overlay" role="dialog" aria-modal="true" aria-label={title} onClick={onClose}>
-      <div className="prompt-modal" onClick={(e) => e.stopPropagation()}>
-        <div className="prompt-icon"><CheckCircle2 size={24} /></div>
-        <button type="button" className="prompt-x" aria-label="关闭" onClick={onClose}><X size={18} /></button>
-        <h2 className="prompt-title">{title}</h2>
-        <div className="prompt-body">{body}</div>
-        <button type="button" className="prompt-btn" onClick={onClose}>{confirmText}</button>
-      </div>
-    </div>
+    <AccessibleModal title={title} onClose={onClose} overlayClassName="prompt-overlay" contentClassName="prompt-modal">
+      <div className="prompt-icon"><CheckCircle2 size={24} /></div>
+      <button type="button" className="prompt-x" aria-label="关闭" onClick={onClose}><X size={18} /></button>
+      <h2 className="prompt-title">{title}</h2>
+      <div className="prompt-body">{body}</div>
+      <button type="button" className="prompt-btn" onClick={onClose}>{confirmText}</button>
+    </AccessibleModal>
   );
 }
 
@@ -169,14 +161,6 @@ export function AnnouncementBanner({ show, title, body, linkUrl, linkLabel, time
     setTab(hasNotice ? 'notice' : 'timeline');
   }, [show, hasContent, sig, hasNotice]);
 
-  useEffect(() => {
-    if (!open) return;
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setOpen(false); };
-    window.addEventListener('keydown', onKey);
-    document.body.style.overflow = 'hidden';
-    return () => { window.removeEventListener('keydown', onKey); document.body.style.overflow = ''; };
-  }, [open]);
-
   if (!mounted || !show || !hasContent) return null;
   const href = safeExternalHref(linkUrl);
   const activeTab = hasNotice && hasTimeline ? tab : (hasNotice ? 'notice' : 'timeline');
@@ -187,44 +171,41 @@ export function AnnouncementBanner({ show, title, body, linkUrl, linkLabel, time
     setOpen(true);
   };
 
-  const modal = open && typeof document !== 'undefined' ? createPortal(
-    <div className="ann-overlay" role="dialog" aria-modal="true" aria-label="系统公告" onClick={() => setOpen(false)}>
-      <div className="ann-modal" onClick={(e) => e.stopPropagation()}>
-        <div className="ann-head">
-          <h2 className="ann-title"><Bell size={18} />系统公告</h2>
-          <button type="button" className="ann-x" aria-label="关闭" onClick={() => setOpen(false)}><X size={20} /></button>
-        </div>
-        {showTabs && (
-          <div className="ann-tabs" role="tablist">
-            <button type="button" role="tab" aria-selected={activeTab === 'notice'} className={`ann-tab ${activeTab === 'notice' ? 'is-active' : ''}`} onClick={() => setTab('notice')}><Bell size={15} /> 通知</button>
-            <button type="button" role="tab" aria-selected={activeTab === 'timeline'} className={`ann-tab ${activeTab === 'timeline' ? 'is-active' : ''}`} onClick={() => setTab('timeline')}><Megaphone size={15} /> 时间线</button>
-          </div>
-        )}
-        <div className="ann-content">
-          {activeTab === 'notice' ? (
-            <div className="ann-notice">
-              {cleanTitle && <p className="ann-notice-title">{cleanTitle}</p>}
-              {cleanBody && <p className="ann-notice-body">{cleanBody}</p>}
-              {href && <a className="ann-notice-link" href={href} target="_blank" rel="noopener noreferrer">{linkLabel?.trim() || '查看详情'}</a>}
-            </div>
-          ) : (
-            <ul className="ann-timeline">
-              {items.map((it, i) => (
-                <li className="ann-tl-item" key={i}>
-                  <span className="ann-tl-node" />
-                  <div className="ann-tl-main">
-                    <p className="ann-tl-body">{(it.body || '').trim()}</p>
-                    {(it.date || '').trim() && <p className="ann-tl-date">{(it.date || '').trim()}</p>}
-                  </div>
-                </li>
-              ))}
-            </ul>
-          )}
-        </div>
-        <div className="ann-actions"><button type="button" className="ann-btn ann-btn-primary" onClick={() => setOpen(false)}>关闭</button></div>
+  const modal = open ? (
+    <AccessibleModal title="系统公告" onClose={() => setOpen(false)} overlayClassName="ann-overlay" contentClassName="ann-modal">
+      <div className="ann-head">
+        <h2 className="ann-title"><Bell size={18} />系统公告</h2>
+        <button type="button" className="ann-x" aria-label="关闭" onClick={() => setOpen(false)}><X size={20} /></button>
       </div>
-    </div>,
-    document.body,
+      {showTabs && (
+        <div className="ann-tabs" role="tablist">
+          <button type="button" role="tab" aria-selected={activeTab === 'notice'} className={`ann-tab ${activeTab === 'notice' ? 'is-active' : ''}`} onClick={() => setTab('notice')}><Bell size={15} /> 通知</button>
+          <button type="button" role="tab" aria-selected={activeTab === 'timeline'} className={`ann-tab ${activeTab === 'timeline' ? 'is-active' : ''}`} onClick={() => setTab('timeline')}><Megaphone size={15} /> 时间线</button>
+        </div>
+      )}
+      <div className="ann-content">
+        {activeTab === 'notice' ? (
+          <div className="ann-notice">
+            {cleanTitle && <p className="ann-notice-title">{cleanTitle}</p>}
+            {cleanBody && <p className="ann-notice-body">{cleanBody}</p>}
+            {href && <a className="ann-notice-link" href={href} target="_blank" rel="noopener noreferrer">{linkLabel?.trim() || '查看详情'}</a>}
+          </div>
+        ) : (
+          <ul className="ann-timeline">
+            {items.map((it, i) => (
+              <li className="ann-tl-item" key={i}>
+                <span className="ann-tl-node" />
+                <div className="ann-tl-main">
+                  <p className="ann-tl-body">{(it.body || '').trim()}</p>
+                  {(it.date || '').trim() && <p className="ann-tl-date">{(it.date || '').trim()}</p>}
+                </div>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+      <div className="ann-actions"><button type="button" className="ann-btn ann-btn-primary" onClick={() => setOpen(false)}>关闭</button></div>
+    </AccessibleModal>
   ) : null;
 
   return (

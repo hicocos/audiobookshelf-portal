@@ -1,11 +1,17 @@
 from contextlib import asynccontextmanager
+import logging
+import re
+from uuid import uuid4
 
-from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
+from fastapi import Depends, FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from sqlmodel import Session
 
 from app.config import Settings
-from app.db import create_db_and_tables, get_engine
+from app.db import create_db_and_tables, get_engine, get_session
+from app.logging_config import configure_json_logging, request_id_context
+from app.observability import observe_http_request, render_metrics, request_timer
 from app.routers.admin_bootstrap import router as admin_bootstrap_router
 from app.routers.admin_codes import router as admin_codes_router
 from app.routers.admin_settings import router as admin_settings_router
@@ -16,8 +22,11 @@ from app.routers.internal_tg import router as internal_tg_router
 from app.routers.me import router as me_router
 from app.routers.public import router as public_router
 
+configure_json_logging()
+logger = logging.getLogger(__name__)
 settings = Settings()
 allowed_origins = [origin.strip() for origin in settings.cors_allowed_origins.split(",") if origin.strip()]
+_REQUEST_ID_PATTERN = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
 
 
 @asynccontextmanager
@@ -28,6 +37,47 @@ async def lifespan(_app: FastAPI):
 
 
 app = FastAPI(title="MoYin.CC Portal API", version="0.1.0", lifespan=lifespan)
+
+
+def _request_id(request: Request) -> str:
+    candidate = request.headers.get("x-request-id", "")
+    return candidate if _REQUEST_ID_PATTERN.fullmatch(candidate) else uuid4().hex
+
+
+@app.middleware("http")
+async def _request_observability_middleware(request: Request, call_next):
+    request_id = _request_id(request)
+    request.state.request_id = request_id
+    token = request_id_context.set(request_id)
+    started_at = request_timer()
+    status = 500
+    route_path = "unmatched"
+    try:
+        response = await call_next(request)
+        status = response.status_code
+        response.headers["X-Request-ID"] = request_id
+        return response
+    finally:
+        route = request.scope.get("route")
+        if route is not None:
+            route_path = getattr(route, "path", "unmatched")
+        duration = observe_http_request(
+            method=request.method,
+            path=route_path,
+            status=status,
+            started_at=started_at,
+        )
+        logger.info(
+            "http_request_completed",
+            extra={
+                "method": request.method,
+                "path": request.url.path,
+                "route": route_path,
+                "status": status,
+                "duration_ms": round(duration * 1000, 3),
+            },
+        )
+        request_id_context.reset(token)
 
 
 def _allowed_origin_values() -> set[str]:
@@ -62,6 +112,14 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.get("/metrics", include_in_schema=False)
+def metrics(session: Session = Depends(get_session)) -> Response:
+    content, content_type = render_metrics(session)
+    return Response(content=content, headers={"Content-Type": content_type})
+
+
 app.include_router(public_router, prefix="/api/public", tags=["public"])
 app.include_router(auth_router)
 app.include_router(admin_bootstrap_router)

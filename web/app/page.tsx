@@ -3,7 +3,7 @@
 import Link from 'next/link';
 import { ArrowUpRight, CalendarClock, Headphones, Library, ShieldCheck, Sparkles, TicketCheck, Waves } from 'lucide-react';
 import { useEffect, useState } from 'react';
-import { AnnouncementBanner, Button, Panel, ShellBackdrop, WordMark } from '@/components/ui';
+import { AnnouncementBanner, Panel, ShellBackdrop, WordMark } from '@/components/ui';
 import { api, PublicSettings } from '@/lib/api';
 
 const fallback: PublicSettings = {
@@ -62,8 +62,8 @@ export default function HomePage() {
             <p className="mt-5 max-w-2xl text-2xl font-black leading-tight text-[var(--foreground)] sm:text-3xl">{heroSubtitle}</p>
             <p className="lede mt-4 max-w-xl">{heroNotice}</p>
             <div className="mt-7 flex flex-col gap-3 sm:flex-row">
-              {registrationOn && <Link href="/register"><Button variant="primary" className="w-full sm:w-auto">{settings.copy.primaryCta || '申请访问'} <ArrowUpRight size={17} /></Button></Link>}
-              <Link href={authed ? '/dashboard' : '/login?next=/dashboard'}><Button variant="secondary" className="w-full sm:w-auto">{settings.copy.secondaryCta || '进入账号中心'}</Button></Link>
+              {registrationOn && <Link href="/register" className="btn btn-primary w-full sm:w-auto">{settings.copy.primaryCta || '申请访问'} <ArrowUpRight size={17} /></Link>}
+              <Link href={authed ? '/dashboard' : '/login?next=/dashboard'} className="btn btn-secondary w-full sm:w-auto">{settings.copy.secondaryCta || '进入账号中心'}</Link>
             </div>
             {supportUrl && <a href={supportUrl} target="_blank" rel="noreferrer" className="mt-4 inline-flex items-center gap-2 text-sm font-black text-[var(--primary)] underline underline-offset-4">遇到问题？联系管理员 <ArrowUpRight size={14} /></a>}
           </div>

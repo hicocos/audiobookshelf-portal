@@ -1,6 +1,6 @@
 from fastapi.testclient import TestClient
 from sqlalchemy.pool import StaticPool
-from sqlmodel import Session, SQLModel, create_engine
+from sqlmodel import Session, SQLModel, create_engine, select
 
 from app.db import get_session
 from app.main import app
@@ -64,7 +64,7 @@ def test_admin_can_create_invite_codes():
         assert len(data["codes"]) == 2
         assert data["codes"][0]["durationDays"] == 30
         with Session(engine) as session:
-            assert len(session.query(Code).all()) == 2
+            assert len(session.exec(select(Code)).all()) == 2
     finally:
         teardown_client()
 
@@ -139,4 +139,3 @@ def test_admin_can_delete_code_and_its_redemptions():
             assert session.get(Code, code_id) is None
     finally:
         teardown_client()
-

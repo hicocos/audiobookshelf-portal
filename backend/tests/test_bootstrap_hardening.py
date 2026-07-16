@@ -1,8 +1,7 @@
 from fastapi.testclient import TestClient
 from sqlalchemy.pool import StaticPool
-from sqlmodel import Session, SQLModel, create_engine
+from sqlmodel import Session, SQLModel, create_engine, select
 
-from app.config import Settings
 from app.db import get_session
 from app.main import app
 from app.models import PortalUser
@@ -71,6 +70,6 @@ def test_bootstrap_requires_setup_token_and_consumes_route_after_initialization(
         )
         assert second.status_code == 409
         with Session(engine) as session:
-            assert len(session.query(PortalUser).all()) == 1
+            assert len(session.exec(select(PortalUser)).all()) == 1
     finally:
         teardown()

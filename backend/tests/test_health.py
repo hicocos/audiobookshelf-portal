@@ -56,6 +56,9 @@ def test_readiness_checks_database_and_abs():
         response = client.get("/api/public/health/ready")
         assert response.status_code == 200
         assert response.json() == {"status": "ready", "database": "ok", "audiobookshelf": "ok"}
+        metrics = client.get("/metrics").text
+        assert 'moyin_dependency_ready{component="database"} 1.0' in metrics
+        assert 'moyin_dependency_ready{component="audiobookshelf"} 1.0' in metrics
     finally:
         app.dependency_overrides.clear()
 

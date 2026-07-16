@@ -1,16 +1,16 @@
+import json
 import logging
 from collections.abc import Awaitable, Callable
 
 import httpx
 from telegram import BotCommand, Update
-from telegram.constants import ChatType, ParseMode
+from telegram.constants import ChatType
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, filters
 
 from app.config import BotSettings
 from app.handlers import (
     SimpleRateLimiter,
     build_cancel_keyboard,
-    build_main_keyboard,
     build_panel_inline_keyboard,
     build_register_confirm_keyboard,
     dashboard_url,
@@ -30,8 +30,9 @@ from app.handlers import (
     parse_register_args,
 )
 from app.internal_api import InternalApi
+from app.logging_config import configure_json_logging, update_id_context
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
+configure_json_logging()
 logger = logging.getLogger(__name__)
 REGISTER_LIMITER = SimpleRateLimiter(max_calls=3, window_seconds=600)
 COMMAND_LIMITER = SimpleRateLimiter(max_calls=30, window_seconds=60)
@@ -57,32 +58,65 @@ async def ensure_private_chat(update: Update) -> bool:
 
 def guarded_handler(handler: BotHandler) -> BotHandler:
     async def wrapped(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        if not await ensure_private_chat(update):
-            return
-        telegram_id, _username = _telegram_identity(update)
-        if not _allow_command(telegram_id):
-            message = update.effective_message
-            if message is not None:
-                await message.reply_text("操作过于频繁，请稍后再试。")
-            return
-        await handler(update, context)
+        token = update_id_context.set(update.update_id)
+        try:
+            if not await ensure_private_chat(update):
+                return
+            telegram_id, _username = _telegram_identity(update)
+            if not _allow_command(telegram_id):
+                message = update.effective_message
+                if message is not None:
+                    await message.reply_text("操作过于频繁，请稍后再试。")
+                return
+            await handler(update, context)
+        finally:
+            update_id_context.reset(token)
 
     return wrapped
 
 
+def _http_error_detail(exc: httpx.HTTPStatusError, fallback: str) -> str:
+    try:
+        payload = exc.response.json()
+    except json.JSONDecodeError:
+        logger.debug(
+            "Bot API error response is not JSON status_code=%s",
+            exc.response.status_code,
+        )
+        return fallback
+    if not isinstance(payload, dict):
+        logger.debug(
+            "Bot API error JSON is not an object status_code=%s",
+            exc.response.status_code,
+        )
+        return fallback
+    detail = payload.get("detail")
+    return str(detail) if detail else fallback
+
+
 async def global_error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     update_id = getattr(update, "update_id", "unknown")
-    logger.error(
-        "Unhandled bot error update_id=%s",
-        update_id,
-        exc_info=(type(context.error), context.error, context.error.__traceback__) if context.error else None,
-    )
-    message = getattr(update, "effective_message", None)
-    if message is not None:
-        try:
-            await message.reply_text("请求失败，请稍后重试。若持续失败，请联系管理员并提供此请求编号：%s" % update_id)
-        except Exception:
-            logger.exception("Failed to send safe error response update_id=%s", update_id)
+    token = update_id_context.set(update_id)
+    try:
+        logger.error(
+            "Unhandled bot error",
+            exc_info=(
+                (type(context.error), context.error, context.error.__traceback__)
+                if context.error
+                else None
+            ),
+        )
+        message = getattr(update, "effective_message", None)
+        if message is not None:
+            try:
+                await message.reply_text(
+                    "请求失败，请稍后重试。若持续失败，请联系管理员并提供此请求编号：%s"
+                    % update_id
+                )
+            except Exception:
+                logger.exception("Failed to send safe error response")
+    finally:
+        update_id_context.reset(token)
 
 
 def _telegram_identity(update: Update) -> tuple[int, str | None]:
@@ -171,11 +205,7 @@ async def bind_code_value(update: Update, context: ContextTypes.DEFAULT_TYPE, co
         context.user_data.pop(FLOW_KEY, None)
         await update.effective_message.reply_text(format_bind_success(data), reply_markup=build_panel_inline_keyboard(_web_console_url()))
     except httpx.HTTPStatusError as exc:
-        detail = "绑定失败，请确认绑定码是否正确或已过期。"
-        try:
-            detail = exc.response.json().get("detail") or detail
-        except Exception:
-            pass
+        detail = _http_error_detail(exc, "绑定失败，请确认绑定码是否正确或已过期。")
         await update.effective_message.reply_text(f"绑定失败：{detail}", reply_markup=build_cancel_keyboard())
 
 
@@ -214,11 +244,7 @@ async def handle_register_invite(update: Update, context: ContextTypes.DEFAULT_T
     try:
         info = await InternalApi().check_register_invite(invite_code=text, telegram_id=telegram_id)
     except httpx.HTTPStatusError as exc:
-        detail = "邀请码不可用，请重新输入或取消。"
-        try:
-            detail = exc.response.json().get("detail") or detail
-        except Exception:
-            pass
+        detail = _http_error_detail(exc, "邀请码不可用，请重新输入或取消。")
         await update.effective_message.reply_text(f"邀请码验证失败：{detail}", reply_markup=build_cancel_keyboard())
         return
     context.user_data[FLOW_KEY] = {"step": FLOW_REGISTER_USERNAME, "invite_code": text, "invite_info": info}
@@ -235,11 +261,7 @@ async def handle_register_username(update: Update, context: ContextTypes.DEFAULT
     try:
         info = await InternalApi().check_register_username(username=text, invite_code=invite_code, telegram_id=telegram_id)
     except httpx.HTTPStatusError as exc:
-        detail = "用户名不可用，请重新输入。"
-        try:
-            detail = exc.response.json().get("detail") or detail
-        except Exception:
-            pass
+        detail = _http_error_detail(exc, "用户名不可用，请重新输入。")
         await update.effective_message.reply_text(f"用户名验证失败：{detail}", reply_markup=build_cancel_keyboard())
         return
     invite_info = flow.get("invite_info") or info
@@ -266,11 +288,7 @@ async def create_account(update: Update, context: ContextTypes.DEFAULT_TYPE, *, 
         context.user_data.pop(FLOW_KEY, None)
         await message.reply_text(format_register_success(data), reply_markup=build_panel_inline_keyboard(_web_console_url()))
     except httpx.HTTPStatusError as exc:
-        detail = "开号失败，请检查用户名和邀请码。"
-        try:
-            detail = exc.response.json().get("detail") or detail
-        except Exception:
-            pass
+        detail = _http_error_detail(exc, "开号失败，请检查用户名和邀请码。")
         await message.reply_text(f"开号失败：{detail}", reply_markup=build_cancel_keyboard())
 
 

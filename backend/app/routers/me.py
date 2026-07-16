@@ -6,11 +6,10 @@ from fastapi import APIRouter, Depends, HTTPException, Response
 from pydantic import BaseModel, Field
 from sqlmodel import Session, select
 
-from app.abs_client import AudiobookshelfClient
 from app.auth_deps import get_current_claims, get_current_user_from_claims
 from app.config import Settings
 from app.db import get_session
-from app.models import Code, PortalUser, ReconciliationJob, utcnow
+from app.models import Code, PortalUser, utcnow
 from app.routers.auth import ensure_user_can_login, get_abs_client_factory, public_user
 from app.security import create_access_token, hash_password, verify_password
 from app.session_cookie import set_session_cookie
@@ -173,7 +172,7 @@ async def redeem(
         try:
             async with abs_factory() as abs_client:
                 await abs_client.update_user(user.abs_user_id, {"isActive": True})
-        except (httpx.HTTPError, TypeError, RuntimeError) as exc:
+        except (httpx.HTTPError, TypeError, RuntimeError):
             upstream_reactivated = False
             upstream_message = "续期已记录，媒体账号正在自动重试恢复；无需重复兑换续期码。"
             enqueue_reconciliation_job(

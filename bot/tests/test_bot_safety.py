@@ -1,7 +1,16 @@
+import json
+import logging
+
+import httpx
 import pytest
 from telegram.constants import ChatType
 
-from app.main import ensure_private_chat, global_error_handler, guarded_handler
+from app.main import (
+    _http_error_detail,
+    global_error_handler,
+    guarded_handler,
+)
+from app.logging_config import JsonFormatter
 
 
 class FakeMessage:
@@ -69,3 +78,31 @@ async def test_global_error_handler_returns_safe_message():
     reply = update.effective_message.replies[-1]
     assert "请求失败" in reply
     assert "secret internal detail" not in reply
+
+
+def test_invalid_error_json_uses_fallback_and_records_debug(caplog):
+    request = httpx.Request("POST", "http://internal/api/internal/tg/bind")
+    response = httpx.Response(400, content=b"not-json", request=request)
+    error = httpx.HTTPStatusError("bad response", request=request, response=response)
+
+    with caplog.at_level(logging.DEBUG):
+        detail = _http_error_detail(error, "安全提示")
+
+    assert detail == "安全提示"
+    assert "not JSON" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_handler_logs_include_update_id_as_json(caplog):
+    update = FakeUpdate()
+
+    async def handler(_update, _context):
+        logging.getLogger("test.bot").info("handled")
+
+    with caplog.at_level(logging.INFO):
+        await guarded_handler(handler)(update, FakeContext())
+
+    record = next(record for record in caplog.records if record.name == "test.bot")
+    payload = json.loads(JsonFormatter().format(record))
+    assert payload["message"] == "handled"
+    assert payload["update_id"] == 987

@@ -2,21 +2,14 @@
 
 import { Activity, AlertTriangle, CalendarClock, Copy, ExternalLink, Eye, LayoutGrid, Lock, KeyRound, LogOut, Power, RefreshCcw, Save, Search, Settings, ShieldCheck, Trash2, UserCog, UserPlus, Users, X } from 'lucide-react';
 import { ReactNode, useEffect, useMemo, useState } from 'react';
+import { AccessibleModal } from '@/components/accessible-modal';
 import { Button, LoadingScreen, Panel, PromptModal, SectionHeader, Sheet, ShellBackdrop, StatusNote, WordMark } from '@/components/ui';
 import { api, clearSession, AdminLibraryOverview, AdminUser, CodeRecord, PublicSettings } from '@/lib/api';
+import { DEFAULT_ADMIN_SETTINGS, hydrateAdminSettings } from '@/lib/admin-settings';
 
 const codeTypeLabels: Record<string, string> = { register: '注册邀请码', renew: '续期码' };
 const statusLabels: Record<string, string> = { active: '正常', expired: '已到期', disabled: '已停用', deleted: '需处理', pending: '待启用' };
-const defaultSettings: PublicSettings = {
-  siteName: 'MoYin.CC', tagline: '安静的声音栖地', registrationEnabled: true, passwordMinLength: 3,
-  copy: { heroKicker: 'AUDIO ISLAND', heroTitle: 'MoYin.CC', heroSubtitle: '安静的声音栖地', primaryCta: '申请访问', secondaryCta: '进入账号中心', notice: '一处安静、专注的声音栖地。' },
-  links: { libraryUrl: '', supportUrl: '', announcementUrl: '' },
-  client: { serverUrl: 'https://listen.moyin.cc', androidDownloadUrl: 'https://mikupan.com/s/AOrU0', iosGuideText: '在 App Store 搜索“EchoShelf”并安装。', desktopGuideText: '暂无稳定方案，建议使用手机或平板。' },
-  announcement: { title: '', body: '', linkUrl: '', linkLabel: '', timeline: [] },
-  features: { registration: true, showLibraryEntry: false, showSupportEntry: false, showAnnouncements: true },
-  operations: { inactivityAutoDisable: false, inactiveDays: 30, newUserGraceDays: 7, lastInactivityCheckAt: null, lastInactivityDisabled: 0 },
-  sections: { benefits: [], steps: [], faq: [] },
-};
+const defaultSettings = DEFAULT_ADMIN_SETTINGS;
 type AdminTab = 'overview' | 'codes' | 'accounts' | 'users' | 'settings';
 
 export default function AdminConfigPage() {
@@ -67,21 +60,11 @@ export default function AdminConfigPage() {
 
   async function loadCodes() { setCodes((await api.listCodes()).codes); }
   function hydrateSettingsForm(value: PublicSettings) {
-    const merged = {
-      ...defaultSettings,
-      ...value,
-      copy: { ...defaultSettings.copy, ...(value.copy || {}) },
-      links: { ...defaultSettings.links, ...(value.links || {}) },
-      client: { ...defaultSettings.client, ...(value.client || {}) },
-      announcement: { ...defaultSettings.announcement, ...(value.announcement || {}) },
-      features: { ...defaultSettings.features, ...(value.features || {}) },
-      operations: { ...defaultSettings.operations, ...(value.operations || {}) },
-      sections: { ...defaultSettings.sections, ...(value.sections || {}) },
-    };
-    setSettings(merged);
-    setStepsText((merged.sections.steps || []).join('\n'));
-    setFaqText((merged.sections.faq || []).map((item) => `${item.q}|${item.a}`).join('\n'));
-    setTimelineText((merged.announcement.timeline || []).map((it) => `${it.date || ''}|${it.body || ''}`).join('\n'));
+    const hydrated = hydrateAdminSettings(value);
+    setSettings(hydrated.settings);
+    setStepsText(hydrated.stepsText);
+    setFaqText(hydrated.faqText);
+    setTimelineText(hydrated.timelineText);
   }
   async function loadSettings() {
     setSettingsReady(false);
@@ -274,13 +257,13 @@ export default function AdminConfigPage() {
       features: { ...settings.features, showLibraryEntry: false },
       links: { ...settings.links, libraryUrl: '' },
     };
-    try { const r = await api.updatePublicSettings(payload); setSettings({ ...defaultSettings, ...r.settings, operations: { ...defaultSettings.operations, ...(r.settings.operations || {}) } }); setMessage('设置已保存'); await refreshOverview(); }
+    try { const r = await api.updatePublicSettings(payload); hydrateSettingsForm(r.settings); setMessage('设置已保存'); await refreshOverview(); }
     catch (err) { setMessage(err instanceof Error ? err.message : '保存失败，请确认管理员登录状态'); }
     finally { setBusy(''); }
   }
   async function runInactivityCheck() {
     setMessage('正在执行活跃度巡检…'); setBusy('inactivity');
-    try { const r = await api.runInactivityCheck(); setSettings({ ...defaultSettings, ...r.settings, operations: { ...defaultSettings.operations, ...(r.settings.operations || {}) } }); setMessage(`巡检完成：检查 ${r.result.checked} 个账号，处理 ${r.result.disabled} 个账号`); await refreshOverview(); }
+    try { const r = await api.runInactivityCheck(); hydrateSettingsForm(r.settings); setMessage(`巡检完成：检查 ${r.result.checked} 个账号，处理 ${r.result.disabled} 个账号`); await refreshOverview(); }
     catch (err) { setMessage(err instanceof Error ? err.message : '巡检失败'); }
     finally { setBusy(''); }
   }
@@ -753,22 +736,19 @@ function StatusBadge({ status, isExpired }: { status: string; isExpired: boolean
 
 function Modal({ title, children, onClose, footer }: { title: string; children: ReactNode; onClose: () => void; footer?: ReactNode }) {
   return (
-    <div
-      className="fixed inset-0 z-[80] flex items-center justify-center overflow-y-auto bg-[rgba(26,23,20,.55)] p-4 pt-[calc(1rem+env(safe-area-inset-top))] backdrop-blur-sm"
-      onClick={onClose}
+    <AccessibleModal
+      title={title}
+      onClose={onClose}
+      overlayClassName="fixed inset-0 z-[80] flex items-center justify-center overflow-y-auto bg-[rgba(26,23,20,.55)] p-4 pt-[calc(1rem+env(safe-area-inset-top))] backdrop-blur-sm"
+      contentClassName="flex max-h-[calc(100dvh-2rem-env(safe-area-inset-top)-env(safe-area-inset-bottom))] w-full max-w-md flex-col overflow-hidden rounded-[20px] border border-[rgba(231,246,253,.16)] bg-[rgba(18,30,45,.96)] shadow-2xl"
     >
-      <div
-        className="flex max-h-[calc(100dvh-2rem-env(safe-area-inset-top)-env(safe-area-inset-bottom))] w-full max-w-md flex-col overflow-hidden rounded-[20px] border border-[rgba(231,246,253,.16)] bg-[rgba(18,30,45,.96)] shadow-2xl"
-        onClick={(e) => e.stopPropagation()}
-      >
-        <div className="flex shrink-0 items-start justify-between gap-3 p-6 pb-0">
-          <h3 className="display-md text-[1.3rem]">{title}</h3>
-          <button onClick={onClose} className="grid size-11 shrink-0 place-items-center rounded-full text-[var(--muted-foreground)] hover:bg-[rgba(255,255,255,.08)]" aria-label="关闭"><X size={18} /></button>
-        </div>
-        <div className="mt-4 min-h-0 flex-1 overflow-y-auto overscroll-contain px-6 pb-5 pr-5">{children}</div>
-        {footer && <div className="shrink-0 border-t border-[rgba(231,246,253,.12)] bg-[rgba(18,30,45,.98)] p-4 pb-[calc(1rem+env(safe-area-inset-bottom))]">{footer}</div>}
+      <div className="flex shrink-0 items-start justify-between gap-3 p-6 pb-0">
+        <h3 className="display-md text-[1.3rem]">{title}</h3>
+        <button type="button" onClick={onClose} className="grid size-11 shrink-0 place-items-center rounded-full text-[var(--muted-foreground)] hover:bg-[rgba(255,255,255,.08)]" aria-label="关闭"><X size={18} /></button>
       </div>
-    </div>
+      <div className="mt-4 min-h-0 flex-1 overflow-y-auto overscroll-contain px-6 pb-5 pr-5">{children}</div>
+      {footer && <div className="shrink-0 border-t border-[rgba(231,246,253,.12)] bg-[rgba(18,30,45,.98)] p-4 pb-[calc(1rem+env(safe-area-inset-bottom))]">{footer}</div>}
+    </AccessibleModal>
   );
 }
 

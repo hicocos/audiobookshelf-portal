@@ -3,7 +3,7 @@ from pathlib import Path
 import pytest
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
-from sqlmodel import Session, SQLModel
+from sqlmodel import Session
 
 from app.db import create_db_and_tables, create_db_engine, get_engine
 from app.models import PortalUser

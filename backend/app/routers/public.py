@@ -7,7 +7,7 @@ from sqlmodel import Session
 from app.auth_deps import get_current_claims, get_current_user_from_claims
 from app.config import Settings
 from app.db import get_session
-from app.models import PortalUser
+from app.observability import set_dependency_ready
 from app.routers.auth import get_abs_client_factory
 from app.services.settings import get_public_settings
 
@@ -34,14 +34,18 @@ async def health_ready(
         session.exec(text("SELECT 1")).one()
     except Exception as exc:  # noqa: BLE001 - readiness must convert DB faults to 503
         status["database"] = "unavailable"
+        set_dependency_ready("database", False)
         raise HTTPException(status_code=503, detail=status) from exc
+    set_dependency_ready("database", True)
     try:
         async with abs_factory() as abs_client:
             if not await abs_client.ping():
                 raise RuntimeError("ABS ping failed")
     except Exception as exc:  # noqa: BLE001 - readiness must convert upstream faults to 503
         status["audiobookshelf"] = "unavailable"
+        set_dependency_ready("audiobookshelf", False)
         raise HTTPException(status_code=503, detail=status) from exc
+    set_dependency_ready("audiobookshelf", True)
     return {"status": "ready", **status}
 
 

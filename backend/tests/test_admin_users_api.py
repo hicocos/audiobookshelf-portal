@@ -2,7 +2,7 @@ from datetime import timedelta
 
 from fastapi.testclient import TestClient
 from sqlalchemy.pool import StaticPool
-from sqlmodel import Session, SQLModel, create_engine
+from sqlmodel import Session, SQLModel, create_engine, select
 
 from app.db import get_session
 from app.main import app
@@ -296,7 +296,7 @@ def test_user_mutations_write_audit_logs():
             uid = user.id
         client.post(f"/api/admin/users/{uid}/expiry", headers=admin_headers(), json={"clear": True})
         with Session(engine) as session:
-            logs = session.query(AuditLog).all()
+            logs = session.exec(select(AuditLog)).all()
             assert any(log.action == "admin.user.set_expiry" for log in logs)
     finally:
         teardown_client()
@@ -317,7 +317,7 @@ def test_deleted_users_hidden_from_list():
     client, engine, _ = make_client(fake)
     try:
         with Session(engine) as session:
-            live = seed_user(session, username="alice", abs_id="abs-alice")
+            seed_user(session, username="alice", abs_id="abs-alice")
             gone = seed_user(session, username="ghost", abs_id="abs-ghost")
             gone.status = "deleted"
             session.add(gone)
@@ -494,7 +494,7 @@ def test_bulk_extend_expiry_updates_only_finite_non_admin_users():
             assert saved_disabled.expires_at > disabled_before + timedelta(days=6)
             assert saved_permanent.expires_at is None
             assert saved_admin.expires_at == admin_before
-            logs = session.query(AuditLog).all()
+            logs = session.exec(select(AuditLog)).all()
             assert any(log.action == "admin.user.bulk_extend_expiry" for log in logs)
     finally:
         teardown_client()

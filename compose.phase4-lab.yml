@@ -1,0 +1,101 @@
+name: moyin-phase4-lab
+
+x-build-args: &build-args
+  BUILD_VERSION: ${BUILD_VERSION:-phase4-lab}
+  BUILD_COMMIT: ${BUILD_COMMIT:-unknown}
+  BUILD_DATE: ${BUILD_DATE:-unknown}
+
+services:
+  phase4-postgres:
+    profiles: ["postgres-lab"]
+    image: postgres:17-alpine@sha256:742f40ea20b9ff2ff31db5458d127452988a2164df9e17441e191f3b72252193
+    restart: "no"
+    environment:
+      POSTGRES_DB: moyin_phase4_lab
+      POSTGRES_USER: moyin_lab
+      POSTGRES_PASSWORD: phase4-disposable-only
+    expose:
+      - "5432"
+    volumes:
+      - phase4-postgres-data:/var/lib/postgresql/data
+    networks:
+      - phase4-lab-internal
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U moyin_lab -d moyin_phase4_lab"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+    security_opt:
+      - no-new-privileges:true
+
+  phase4-alembic:
+    profiles: ["postgres-lab"]
+    build:
+      context: ./backend
+      target: phase4-lab
+      args: *build-args
+    restart: "no"
+    environment:
+      DATABASE_URL: postgresql+psycopg://moyin_lab:phase4-disposable-only@phase4-postgres:5432/moyin_phase4_lab
+    depends_on:
+      phase4-postgres:
+        condition: service_healthy
+    networks:
+      - phase4-lab-internal
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=32m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+
+  phase4-redis:
+    profiles: ["redis-lab"]
+    image: redis:8-alpine@sha256:9d317178eceac8454a2284a9e6df2466b93c745529947f0cd42a0fa9609d7005
+    restart: "no"
+    command: ["redis-server", "--appendonly", "yes", "--protected-mode", "yes"]
+    expose:
+      - "6379"
+    volumes:
+      - phase4-redis-data:/data
+    networks:
+      - phase4-lab-internal
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+    security_opt:
+      - no-new-privileges:true
+
+  phase4-redis-check:
+    profiles: ["redis-lab"]
+    image: redis:8-alpine@sha256:9d317178eceac8454a2284a9e6df2466b93c745529947f0cd42a0fa9609d7005
+    restart: "no"
+    command:
+      - sh
+      - -ec
+      - |
+        test "$(redis-cli -h phase4-redis ping)" = PONG
+        redis-cli -h phase4-redis set phase4:lab:probe ok EX 60
+        test "$(redis-cli -h phase4-redis get phase4:lab:probe)" = ok
+        redis-cli -h phase4-redis del phase4:lab:probe
+    depends_on:
+      phase4-redis:
+        condition: service_healthy
+    networks:
+      - phase4-lab-internal
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+
+networks:
+  phase4-lab-internal:
+    internal: true
+
+volumes:
+  phase4-postgres-data:
+  phase4-redis-data:

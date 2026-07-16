@@ -1,6 +1,5 @@
 from datetime import timedelta
 
-from fastapi.testclient import TestClient
 from sqlalchemy.pool import StaticPool
 from sqlmodel import Session, SQLModel, create_engine, select
 
