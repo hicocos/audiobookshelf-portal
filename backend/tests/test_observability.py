@@ -1,10 +1,12 @@
 import re
+from secrets import token_hex
 
 from fastapi.testclient import TestClient
 from sqlalchemy.pool import StaticPool
 from sqlmodel import Session, SQLModel, create_engine
 
 from app.db import get_session
+from app.logging_config import request_id_context
 from app.main import app
 from app.models import ReconciliationJob
 
@@ -56,14 +58,30 @@ def test_request_id_is_preserved_or_generated_and_returned() -> None:
     assert re.fullmatch(r"[0-9a-f]{32}", generated.headers["X-Request-ID"])
 
 
+def test_metrics_reject_anonymous_requests() -> None:
+    client, engine = _client()
+    try:
+        response = client.get("/metrics")
+    finally:
+        app.dependency_overrides.clear()
+        client.close()
+        engine.dispose()
+
+    assert response.status_code == 404
+
+
 def test_metrics_cover_http_backlog_and_worker_lag(monkeypatch, tmp_path) -> None:
     worker_state = tmp_path / "worker-health.json"
     worker_state.write_text('{"lastSuccess":1}')
     monkeypatch.setenv("WORKER_HEALTH_STATE_PATH", str(worker_state))
+    monkeypatch.setenv("METRICS_TOKEN", "observability-test-token")
     client, engine = _client()
     try:
         client.get("/api/public/health/live")
-        response = client.get("/metrics")
+        response = client.get(
+            "/metrics",
+            headers={"Authorization": "Bearer observability-test-token"},
+        )
     finally:
         app.dependency_overrides.clear()
         client.close()
@@ -82,3 +100,27 @@ def test_metrics_cover_http_backlog_and_worker_lag(monkeypatch, tmp_path) -> Non
     assert worker_lag is not None
     assert float(worker_lag.group(1)) > 0
     assert 'moyin_dependency_ready{component="audiobookshelf"}' in body
+
+
+def test_unhandled_exception_returns_request_id_and_resets_context() -> None:
+    path = f"/test-observability-error-{token_hex(4)}"
+
+    async def explode():
+        raise RuntimeError("expected test failure")
+
+    app.add_api_route(path, explode, methods=["GET"])
+    client, engine = _client()
+    client.raise_server_exceptions = False
+    try:
+        failed = client.get(path, headers={"X-Request-ID": "failure-request"})
+        healthy = client.get("/api/public/health/live")
+    finally:
+        app.dependency_overrides.clear()
+        client.close()
+        engine.dispose()
+
+    assert failed.status_code == 500
+    assert failed.headers["X-Request-ID"] == "failure-request"
+    assert failed.json() == {"detail": "Internal server error", "requestId": "failure-request"}
+    assert healthy.headers["X-Request-ID"] != "failure-request"
+    assert request_id_context.get() is None

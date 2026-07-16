@@ -50,13 +50,16 @@ def test_liveness_does_not_depend_on_database_or_abs():
         app.dependency_overrides.clear()
 
 
-def test_readiness_checks_database_and_abs():
+def test_readiness_checks_database_and_abs(monkeypatch):
+    monkeypatch.setenv("METRICS_TOKEN", "health-test-token")
     client = _client(ReadyAbsClient())
     try:
         response = client.get("/api/public/health/ready")
         assert response.status_code == 200
         assert response.json() == {"status": "ready", "database": "ok", "audiobookshelf": "ok"}
-        metrics = client.get("/metrics").text
+        metrics = client.get(
+            "/metrics", headers={"Authorization": "Bearer health-test-token"}
+        ).text
         assert 'moyin_dependency_ready{component="database"} 1.0' in metrics
         assert 'moyin_dependency_ready{component="audiobookshelf"} 1.0' in metrics
     finally:

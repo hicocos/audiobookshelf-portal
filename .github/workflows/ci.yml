@@ -60,7 +60,7 @@ jobs:
       - name: Build production images once
         env:
           BUILD_VERSION: ${{ github.sha }}
-          BUILD_SHA: ${{ github.sha }}
+          BUILD_COMMIT: ${{ github.sha }}
           BUILD_DATE: ${{ github.event.repository.updated_at }}
         run: docker compose build moyin-api moyin-bot moyin-web
       - name: Generate SBOM

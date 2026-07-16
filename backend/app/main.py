@@ -1,5 +1,6 @@
 from contextlib import asynccontextmanager
 import logging
+import os
 import re
 from uuid import uuid4
 
@@ -52,32 +53,49 @@ async def _request_observability_middleware(request: Request, call_next):
     started_at = request_timer()
     status = 500
     route_path = "unmatched"
+    response: Response | None = None
     try:
-        response = await call_next(request)
-        status = response.status_code
+        try:
+            response = await call_next(request)
+            status = response.status_code
+        except Exception:  # noqa: BLE001 - this is the final sanitized HTTP boundary
+            logger.exception("unhandled_request_error")
+            response = JSONResponse(
+                {"detail": "Internal server error", "requestId": request_id},
+                status_code=500,
+            )
         response.headers["X-Request-ID"] = request_id
         return response
     finally:
-        route = request.scope.get("route")
-        if route is not None:
-            route_path = getattr(route, "path", "unmatched")
-        duration = observe_http_request(
-            method=request.method,
-            path=route_path,
-            status=status,
-            started_at=started_at,
-        )
-        logger.info(
-            "http_request_completed",
-            extra={
-                "method": request.method,
-                "path": request.url.path,
-                "route": route_path,
-                "status": status,
-                "duration_ms": round(duration * 1000, 3),
-            },
-        )
-        request_id_context.reset(token)
+        try:
+            route = request.scope.get("route")
+            if route is not None:
+                route_path = getattr(route, "path", "unmatched")
+            try:
+                duration = observe_http_request(
+                    method=request.method,
+                    path=route_path,
+                    status=status,
+                    started_at=started_at,
+                )
+            except Exception:  # noqa: BLE001 - telemetry must never affect the response
+                logger.exception("http_metrics_failed")
+                duration = max(0.0, request_timer() - started_at)
+            try:
+                logger.info(
+                    "http_request_completed",
+                    extra={
+                        "method": request.method,
+                        "path": request.url.path,
+                        "route": route_path,
+                        "status": status,
+                        "duration_ms": round(duration * 1000, 3),
+                    },
+                )
+            except Exception:  # logging failure is intentionally non-fatal  # nosec B110
+                pass
+        finally:
+            request_id_context.reset(token)
 
 
 def _allowed_origin_values() -> set[str]:
@@ -115,7 +133,11 @@ app.add_middleware(
 
 
 @app.get("/metrics", include_in_schema=False)
-def metrics(session: Session = Depends(get_session)) -> Response:
+def metrics(request: Request, session: Session = Depends(get_session)) -> Response:
+    configured_token = os.getenv("METRICS_TOKEN", "")
+    supplied = request.headers.get("authorization", "")
+    if not configured_token or supplied != f"Bearer {configured_token}":
+        return Response(status_code=404)
     content, content_type = render_metrics(session)
     return Response(content=content, headers={"Content-Type": content_type})
 

@@ -60,6 +60,7 @@ services:
     env_file: .env.api
     environment:
       TZ: Asia/Shanghai
+      METRICS_TOKEN: ${METRICS_TOKEN:-}
     volumes:
       - moyin-data:/data
     ports:
