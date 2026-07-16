@@ -48,7 +48,9 @@
 
 - 公网 Portal `/`、`/login`、`/admin`：HSTS、CSP、DENY frame、nosniff、Referrer-Policy、Permissions-Policy 生效，未见 X-Powered-By。
 - Portal 动态 API：`private, no-store`、`cf-cache-status: DYNAMIC`；匿名 `/api/me` 与 `/api/admin/users` 均 401。
-- 公网 `/metrics` 为 404；指标仅通过宿主 localhost API 端口采集。
+- 公网 `/metrics` 为 404；宿主 localhost 匿名访问同样为 404。指标端点现为 fail-closed，只有配置 `METRICS_TOKEN` 并携带 Bearer token 的监控采集器才可读取。
+- 独立代码审查发现并已修复 request-ID 的未处理异常路径：安全 500 响应携带 `X-Request-ID`，观测/日志异常不会掩盖业务异常，ContextVar 在独立最外层 `finally` 复位；新增回归测试后 Backend 为 148 passed。
+- 最终 API/Worker 热修复发布版本 `phase5-final`，revision `35acdf4f1787`，二者 healthy 且使用同一镜像。
 - CORS 恶意 Origin 预检为 400；伪 Cookie 且无 Origin/Referer 的写请求为 403。
 - 已初始化实例匿名 bootstrap 返回 409（路由关闭状态）；257 字符登录密码在哈希前返回 422。
 - 密码最低长度复读为 3，证明本轮没有误改延期项。
