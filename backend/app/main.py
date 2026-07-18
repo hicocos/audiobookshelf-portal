@@ -26,6 +26,7 @@ from app.routers.internal_tg_features import router as internal_tg_features_rout
 from app.routers.me import router as me_router
 from app.routers.public import router as public_router
 from app.routers.user_features import router as user_features_router
+from app.scheduler import Scheduler
 
 configure_json_logging()
 logger = logging.getLogger(__name__)
@@ -36,11 +37,15 @@ _REQUEST_ID_PATTERN = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
-    engine = get_engine(settings.database_url)
+    runtime_settings = Settings()
+    engine = get_engine(runtime_settings.database_url)
     create_db_and_tables(engine)
+    scheduler = Scheduler(runtime_settings)
+    scheduler.start()
     try:
         yield
     finally:
+        await scheduler.stop()
         await close_shared_abs_clients()
 
 

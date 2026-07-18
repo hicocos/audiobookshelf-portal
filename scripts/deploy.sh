@@ -3,7 +3,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 TEMPLATE_DIR="$ROOT_DIR/deploy/env"
-RUNTIME_FILES=(.env .env.api .env.worker .env.bot)
+RUNTIME_FILES=(.env .env.api .env.bot)
 
 usage() {
   cat <<'EOF'
@@ -71,13 +71,11 @@ init_config() {
     JWT_SECRET "$jwt_secret" TELEGRAM_BOT_USERNAME "$bot_username" \
     INTERNAL_TOKEN "$internal_token" ADMIN_SETUP_TOKEN "$admin_setup_token" \
     METRICS_TOKEN "$metrics_token"
-  render "$TEMPLATE_DIR/worker.env.example" "$ROOT_DIR/.env.worker" \
-    ABS_ADMIN_TOKEN "$abs_token"
   render "$TEMPLATE_DIR/bot.env.example" "$ROOT_DIR/.env.bot" \
     TELEGRAM_BOT_TOKEN "$bot_token" TELEGRAM_BOT_USERNAME "$bot_username" \
     INTERNAL_TOKEN "$internal_token" PORTAL_PUBLIC_URL "$portal_url"
 
-  printf 'created .env, .env.api, .env.worker, and .env.bot with mode 0600\n'
+  printf 'created .env, .env.api, and .env.bot with mode 0600\n'
   printf 'edit CHANGE_ME values and public URLs, then run: ./scripts/deploy.sh check\n'
 }
 
@@ -112,7 +110,7 @@ start_stack() {
   export BUILD_VERSION="${BUILD_VERSION:-$(date -u +%Y%m%d-%H%M%S)}"
   export BUILD_COMMIT="${BUILD_COMMIT:-$(git -C "$ROOT_DIR" rev-parse --short=12 HEAD 2>/dev/null || printf unknown)}"
   export BUILD_DATE="${BUILD_DATE:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}"
-  (cd "$ROOT_DIR" && docker compose up -d --build)
+  (cd "$ROOT_DIR" && docker compose up -d --build --remove-orphans)
   (cd "$ROOT_DIR" && docker compose ps)
 }
 

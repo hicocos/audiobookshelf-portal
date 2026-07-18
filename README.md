@@ -6,7 +6,7 @@ P0–P3 的实现和上线状态见 [`ROADMAP.md`](./ROADMAP.md)。
 
 ## Quick start
 
-新机器只需要 Docker、Docker Compose v2、Git 和 OpenSSL。初始化脚本会生成四份
+新机器只需要 Docker、Docker Compose v2、Git 和 OpenSSL。初始化脚本会生成三份
 权限为 `0600` 的服务隔离配置，并自动创建 JWT、内部 API、指标和管理员初始化密钥：
 
 ```bash
@@ -47,7 +47,7 @@ All service runtimes, logs, Bot messages, and Web date displays use
 `Asia/Shanghai`. Database timestamps and API transport values remain UTC internally
 and are converted at the display boundary.
 
-The background worker queues account-expiry reminders in a durable outbox.
+The API's built-in scheduler queues account-expiry reminders in a durable outbox.
 The Bot claims and acknowledges those messages, with retry/backoff for transient
 Telegram failures. Feature switches and reminder timing are available in the admin
 configuration page.

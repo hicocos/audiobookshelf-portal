@@ -38,7 +38,7 @@ def _format_stats(data: dict[str, Any]) -> str:
         f"待处理工单：{data.get('pendingRequests', 0)}\n"
         f"群组宽限中：{data.get('groupGrace', 0)}\n"
         f"待投递通知：{data.get('pendingNotifications', 0)}\n"
-        f"Worker：{'正常' if worker.get('healthy') else '异常'}"
+        f"定时任务：{'正常' if worker.get('healthy') else '异常'}"
     )
 
 

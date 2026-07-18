@@ -53,6 +53,17 @@ class Settings(BaseSettings):
         default=900,
         alias="WORKER_HEALTH_MAX_AGE_SECONDS",
     )
+    scheduler_enabled: bool = Field(default=True, alias="SCHEDULER_ENABLED")
+    scheduler_interval_seconds: int = Field(
+        default=300,
+        ge=1,
+        le=86400,
+        alias="SCHEDULER_INTERVAL_SECONDS",
+    )
+    scheduler_lock_path: str = Field(
+        default="/data/scheduler.lock",
+        alias="SCHEDULER_LOCK_PATH",
+    )
 
     @model_validator(mode="after")
     def validate_production_secrets(self) -> "Settings":

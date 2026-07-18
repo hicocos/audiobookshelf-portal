@@ -75,51 +75,9 @@ services:
       retries: 3
       start_period: 30s
     logging: *default-logging
-    mem_limit: 512m
-    mem_reservation: 96m
-    cpus: 1.0
-    pids_limit: 128
-    read_only: true
-    tmpfs:
-      - /tmp:rw,noexec,nosuid,size=64m
-    cap_drop:
-      - ALL
-    security_opt:
-      - no-new-privileges:true
-
-  moyin-worker:
-    image: audiobookshelf-portal-backend:${BUILD_VERSION:-dev}
-    build:
-      context: ./backend
-      args: *build-args
-      labels: *build-labels
-    container_name: moyin-worker
-    restart: unless-stopped
-    init: true
-    stop_grace_period: 60s
-    env_file: .env.worker
-    environment:
-      TZ: Asia/Shanghai
-    volumes:
-      - moyin-data:/data
-    command: ["python", "-m", "app.worker", "--interval", "300"]
-    depends_on:
-      moyin-api:
-        condition: service_healthy
-    healthcheck:
-      test:
-        - CMD
-        - python
-        - -c
-        - "from app.worker_health import check_worker_health; check_worker_health()"
-      interval: 60s
-      timeout: 5s
-      retries: 3
-      start_period: 60s
-    logging: *default-logging
-    mem_limit: 512m
-    mem_reservation: 96m
-    cpus: 1.0
+    mem_limit: 768m
+    mem_reservation: 128m
+    cpus: 1.5
     pids_limit: 128
     read_only: true
     tmpfs:
