@@ -1,4 +1,5 @@
 from collections.abc import Callable
+import logging
 from datetime import UTC, timedelta
 from functools import lru_cache
 from typing import Any
@@ -7,6 +8,7 @@ import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 from sqlalchemy import func
+from sqlalchemy.exc import SQLAlchemyError
 from sqlmodel import Session, select
 
 from app.abs_client import AudiobookshelfClient
@@ -18,8 +20,11 @@ from app.security import create_access_token, hash_password, verify_password
 from app.session_cookie import clear_session_cookie, set_session_cookie
 from app.services.codes import CodeValidationError, redeem_code
 from app.services.settings import get_public_settings
+from app.services.referrals import settle_referral_reward
+from app.services.reconciliation import enqueue_reconciliation_job
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
+logger = logging.getLogger(__name__)
 
 
 class RegisterRequest(BaseModel):
@@ -105,12 +110,26 @@ def _shared_abs_client(base_url: str, token: str) -> AudiobookshelfClient:
     return AudiobookshelfClient(base_url, token, keep_open=True)
 
 
+_opened_shared_clients: set[AudiobookshelfClient] = set()
+
+
+async def close_shared_abs_clients() -> None:
+    clients = list(_opened_shared_clients)
+    _opened_shared_clients.clear()
+    for client in clients:
+        await client.aclose()
+    cache_clear = getattr(_shared_abs_client, "cache_clear", None)
+    if cache_clear is not None:
+        cache_clear()
+
+
 def get_abs_client_factory() -> Callable[[], AudiobookshelfClient]:
     settings = Settings()
     client = _shared_abs_client(
         settings.audiobookshelf_url,
         settings.audiobookshelf_admin_token,
     )
+    _opened_shared_clients.add(client)
     return lambda: client
 
 
@@ -178,8 +197,43 @@ async def register(
         expires_at=expires_at,
     )
     session.add(user)
-    session.commit()
+    try:
+        session.commit()
+    except SQLAlchemyError as exc:
+        session.rollback()
+        compensated = False
+        try:
+            async with abs_factory() as abs_client:
+                await abs_client.delete_user(str(abs_user["id"]))
+            compensated = True
+        except (httpx.HTTPError, TypeError, RuntimeError, KeyError):
+            logger.exception("Failed to compensate orphan ABS user after registration")
+        if not compensated:
+            # Persist a durable cleanup if the database itself is available
+            # after rollback. If it is not, the original exception still
+            # surfaces and the incident is visible in logs.
+            try:
+                enqueue_reconciliation_job(
+                    session,
+                    idempotency_key=f"register-cleanup:{abs_user['id']}",
+                    operation="delete_user",
+                    target_type="registration_orphan",
+                    target_id=payload.username,
+                    abs_user_id=str(abs_user["id"]),
+                    payload={"source": "web_registration_commit_failure"},
+                )
+                session.commit()
+            except SQLAlchemyError:
+                session.rollback()
+        raise HTTPException(
+            status_code=503,
+            detail="Registration could not be completed; no invite was consumed. Please retry.",
+        ) from exc
     session.refresh(user)
+    try:
+        settle_referral_reward(session, code=code, registered_user=user)
+    except Exception:  # noqa: BLE001 - registration succeeded; worker can settle later
+        logger.exception("Failed to settle referral reward after registration")
     token = create_access_token(
         subject=user.id,
         role=user.role,

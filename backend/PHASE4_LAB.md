@@ -14,7 +14,11 @@ docker compose -f compose.phase4-lab.yml --profile postgres-lab run --rm \
 docker compose -f compose.phase4-lab.yml --profile postgres-lab down -v
 ```
 
-预期 Alembic 升级到 `20260717_0001 (head)`。基线迁移是空 PostgreSQL 数据库的演练基线；现有生产 SQLite 仍继续由当前运行时代码管理，禁止把这里的 `DATABASE_URL` 或命令指向生产数据库。正式迁移前仍需单独验证类型、时区、唯一约束、外键删除行为、停机窗口和回滚。
+预期 Alembic 依次升级到 `20260717_0004 (head)`；`0001` 是空 PostgreSQL
+数据库的演练基线，后续迁移覆盖 Telegram 生命周期、社群激励和媒体工单约束。
+现有生产 SQLite 仍继续由当前运行时代码管理，禁止把这里的 `DATABASE_URL` 或命令
+指向生产数据库。正式迁移前仍需单独验证类型、时区、唯一约束、外键删除行为、
+停机窗口和回滚。
 
 ## Redis
 

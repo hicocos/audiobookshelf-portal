@@ -37,6 +37,12 @@ class Settings(BaseSettings):
     telegram_bind_code_max_failures: int = Field(default=5, alias="TELEGRAM_BIND_CODE_MAX_FAILURES")
     telegram_search_scan_limit: int = Field(default=200, alias="TELEGRAM_SEARCH_SCAN_LIMIT")
     telegram_search_result_limit: int = Field(default=8, alias="TELEGRAM_SEARCH_RESULT_LIMIT")
+    telegram_flow_ttl_minutes: int = Field(default=15, alias="TELEGRAM_FLOW_TTL_MINUTES")
+    telegram_password_reset_ttl_minutes: int = Field(
+        default=10,
+        alias="TELEGRAM_PASSWORD_RESET_TTL_MINUTES",
+    )
+    telegram_admin_ids: str = Field(default="", alias="TELEGRAM_ADMIN_IDS")
     trusted_proxy_ips: str = Field(default="127.0.0.1,::1", alias="TRUSTED_PROXY_IPS")
     admin_setup_token: str = Field(default="", alias="ADMIN_SETUP_TOKEN")
     worker_health_state_path: str = Field(

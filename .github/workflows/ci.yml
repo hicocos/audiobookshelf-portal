@@ -55,6 +55,8 @@ jobs:
     needs: [python, web]
     steps:
       - uses: actions/checkout@v4
+      - name: Generate isolated CI configuration
+        run: ./scripts/deploy.sh init
       - run: docker compose config -q
       - run: docker compose -f compose.phase4-lab.yml config -q
       - name: Build production images once
@@ -68,9 +70,37 @@ jobs:
         with:
           image: audiobookshelf-portal-backend:${{ github.sha }}
           artifact-name: backend-sbom.spdx.json
+      - name: Generate Web SBOM
+        uses: anchore/sbom-action@v0
+        with:
+          image: audiobookshelf-portal-web:${{ github.sha }}
+          artifact-name: web-sbom.spdx.json
+      - name: Generate Bot SBOM
+        uses: anchore/sbom-action@v0
+        with:
+          image: audiobookshelf-portal-bot:${{ github.sha }}
+          artifact-name: bot-sbom.spdx.json
       - name: Scan backend image
         uses: aquasecurity/trivy-action@0.33.1
         with:
           image-ref: audiobookshelf-portal-backend:${{ github.sha }}
+          severity: HIGH,CRITICAL
+          exit-code: '1'
+      - name: Scan Web image
+        uses: aquasecurity/trivy-action@0.33.1
+        with:
+          image-ref: audiobookshelf-portal-web:${{ github.sha }}
+          severity: HIGH,CRITICAL
+          exit-code: '1'
+      - name: Scan Bot image
+        uses: aquasecurity/trivy-action@0.33.1
+        with:
+          image-ref: audiobookshelf-portal-bot:${{ github.sha }}
+          severity: HIGH,CRITICAL
+          exit-code: '1'
+      - name: Scan pinned Audiobookshelf image
+        uses: aquasecurity/trivy-action@0.33.1
+        with:
+          image-ref: ghcr.io/advplyr/audiobookshelf@sha256:1eef6716183c52abafe5405e7d6be8390248ecd59c7488c44af871757ac8fc4d
           severity: HIGH,CRITICAL
           exit-code: '1'

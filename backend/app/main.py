@@ -16,12 +16,16 @@ from app.observability import observe_http_request, render_metrics, request_time
 from app.routers.admin_bootstrap import router as admin_bootstrap_router
 from app.routers.admin_codes import router as admin_codes_router
 from app.routers.admin_settings import router as admin_settings_router
+from app.routers.admin_operations import router as admin_operations_router
 from app.routers.admin_users import router as admin_users_router
-from app.routers.auth import router as auth_router
+from app.routers.auth import close_shared_abs_clients, router as auth_router
 from app.routers.library import router as library_router
 from app.routers.internal_tg import router as internal_tg_router
+from app.routers.internal_tg_admin import router as internal_tg_admin_router
+from app.routers.internal_tg_features import router as internal_tg_features_router
 from app.routers.me import router as me_router
 from app.routers.public import router as public_router
+from app.routers.user_features import router as user_features_router
 
 configure_json_logging()
 logger = logging.getLogger(__name__)
@@ -34,7 +38,10 @@ _REQUEST_ID_PATTERN = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
 async def lifespan(_app: FastAPI):
     engine = get_engine(settings.database_url)
     create_db_and_tables(engine)
-    yield
+    try:
+        yield
+    finally:
+        await close_shared_abs_clients()
 
 
 app = FastAPI(title="MoYin.CC Portal API", version="0.1.0", lifespan=lifespan)
@@ -147,7 +154,11 @@ app.include_router(auth_router)
 app.include_router(admin_bootstrap_router)
 app.include_router(admin_codes_router)
 app.include_router(admin_settings_router)
+app.include_router(admin_operations_router)
 app.include_router(admin_users_router)
 app.include_router(me_router)
+app.include_router(user_features_router)
 app.include_router(library_router)
 app.include_router(internal_tg_router)
+app.include_router(internal_tg_features_router)
+app.include_router(internal_tg_admin_router)

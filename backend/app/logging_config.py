@@ -4,11 +4,13 @@ import json
 import logging
 import os
 from contextvars import ContextVar
-from datetime import UTC, datetime
+from datetime import datetime
 from typing import Any
+from zoneinfo import ZoneInfo
 
 request_id_context: ContextVar[str | None] = ContextVar("request_id", default=None)
 _original_record_factory = logging.getLogRecordFactory()
+_SHANGHAI_TIMEZONE = ZoneInfo("Asia/Shanghai")
 
 
 def _record_factory(*args: Any, **kwargs: Any) -> logging.LogRecord:
@@ -20,7 +22,9 @@ def _record_factory(*args: Any, **kwargs: Any) -> logging.LogRecord:
 class JsonFormatter(logging.Formatter):
     def format(self, record: logging.LogRecord) -> str:
         payload: dict[str, Any] = {
-            "timestamp": datetime.now(UTC).isoformat(timespec="milliseconds"),
+            "timestamp": datetime.now(_SHANGHAI_TIMEZONE).isoformat(
+                timespec="milliseconds"
+            ),
             "level": record.levelname,
             "logger": record.name,
             "service": "moyin-api",

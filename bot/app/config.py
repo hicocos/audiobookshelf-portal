@@ -13,3 +13,10 @@ class BotSettings(BaseSettings):
         default="https://mikupan.com/f/30kbFd/IMG_20260712_090816_398.jpg",
         alias="TELEGRAM_WELCOME_IMAGE_URL",
     )
+    telegram_notification_poll_seconds: int = Field(
+        default=5,
+        ge=1,
+        le=300,
+        alias="TELEGRAM_NOTIFICATION_POLL_SECONDS",
+    )
+    telegram_admin_ids: str = Field(default="", alias="TELEGRAM_ADMIN_IDS")

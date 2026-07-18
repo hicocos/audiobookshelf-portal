@@ -1,21 +1,24 @@
-from datetime import UTC, timedelta
 from typing import Any
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Response
+from fastapi.encoders import jsonable_encoder
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from sqlmodel import Session, select
 
 from app.auth_deps import get_current_claims, get_current_user_from_claims
 from app.config import Settings
 from app.db import get_session
-from app.models import Code, PortalUser, utcnow
+from app.models import CodeRedemption, MediaRequest, PointLedgerEntry, PortalUser, utcnow
 from app.routers.auth import ensure_user_can_login, get_abs_client_factory, public_user
 from app.security import create_access_token, hash_password, verify_password
 from app.session_cookie import set_session_cookie
-from app.services.codes import CodeValidationError, redeem_code
+from app.services.account_lifecycle import lifecycle_http_error, renew_user
+from app.services.capabilities import user_capabilities
+from app.services.codes import CodeValidationError, validate_code
 from app.services.expiry import disable_upstream_if_expired
-from app.services.reconciliation import enqueue_reconciliation_job
+from app.services.settings import get_public_settings
 from app.services.telegram_binding import TelegramBindingError, create_bind_token, unbind_telegram_user
 
 router = APIRouter(prefix="/api/me", tags=["me"])
@@ -91,7 +94,65 @@ async def me(
     # now rather than waiting for the background worker's next tick.
     await disable_upstream_if_expired(user, session, abs_factory)
     user = await sync_upstream_account_status(user, session, abs_factory)
-    return {"user": public_user(user)}
+    return {
+        "user": public_user(user),
+        "capabilities": user_capabilities(user, get_public_settings(session)),
+    }
+
+
+@router.get("/export")
+def export_my_data(
+    user: PortalUser = Depends(get_current_user),
+    session: Session = Depends(get_session),
+) -> JSONResponse:
+    redemptions = session.exec(
+        select(CodeRedemption)
+        .where(CodeRedemption.portal_user_id == user.id)
+        .order_by(CodeRedemption.created_at)
+    ).all()
+    requests = session.exec(
+        select(MediaRequest)
+        .where(MediaRequest.portal_user_id == user.id)
+        .order_by(MediaRequest.created_at)
+    ).all()
+    points = session.exec(
+        select(PointLedgerEntry)
+        .where(PointLedgerEntry.portal_user_id == user.id)
+        .order_by(PointLedgerEntry.created_at)
+    ).all()
+    payload = {
+        "exportedAt": utcnow(),
+        "account": {
+            "id": user.id,
+            "username": user.username,
+            "email": user.email,
+            "role": user.role,
+            "status": user.status,
+            "expiresAt": user.expires_at,
+            "createdAt": user.created_at,
+            "lastLoginAt": user.last_login_at,
+            "passwordChangedAt": user.password_changed_at,
+            "telegramId": user.telegram_id,
+            "telegramUsername": user.telegram_username,
+            "telegramBoundAt": user.telegram_bound_at,
+        },
+        "codeRedemptions": redemptions,
+        "mediaRequests": requests,
+        "pointHistory": points,
+        "notIncluded": [
+            "password hashes and reset tokens",
+            "administrator security audit records",
+            "Audiobookshelf listening activity; request it from the service operator",
+        ],
+    }
+    return JSONResponse(
+        content=jsonable_encoder(payload),
+        headers={
+            "Content-Disposition": (
+                f'attachment; filename="moyin-data-{user.username}-{utcnow().date().isoformat()}.json"'
+            )
+        },
+    )
 
 
 @router.post("/telegram/bind-token")
@@ -128,69 +189,23 @@ async def redeem(
     session: Session = Depends(get_session),
     abs_factory: Any = Depends(get_abs_client_factory),
 ) -> dict[str, Any]:
-    # Peek at the code first (purpose + duration) so we can short-circuit the
-    # "already permanent + permanent renewal code" case WITHOUT consuming a use.
-    # The user is already on a lifetime plan, so applying a permanent code would
-    # be a no-op that silently wastes the code — instead we reject and the
-    # frontend shows a popup explaining the account is already permanent.
-    normalized = payload.code.strip().upper()
-    peek = session.exec(select(Code).where(Code.code == normalized)).first()
-    if (
-        peek is not None
-        and peek.status == "active"
-        and peek.type == "renew"
-        and peek.duration_days == 0
-        and user.expires_at is None
-        and user.status == "active"
-    ):
-        raise HTTPException(status_code=409, detail="account already permanent")
-
+    capabilities = user_capabilities(user, get_public_settings(session))
+    if not capabilities["canRenew"]:
+        raise HTTPException(
+            status_code=403,
+            detail=capabilities["unavailableReasons"].get("renew", "续期功能当前未开放。"),
+        )
     try:
-        code = redeem_code(session, payload.code, username=user.username, action="renew")
+        code = validate_code(session, payload.code, username=user.username, action="renew")
+        result = await renew_user(session, user, code, abs_factory=abs_factory)
     except CodeValidationError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-    was_expired = user.status == "expired"
-    if code.duration_days == 0:
-        user.expires_at = None
-    else:
-        now = utcnow()
-        current_expiry = user.expires_at
-        if current_expiry is not None and current_expiry.tzinfo is None:
-            current_expiry = current_expiry.replace(tzinfo=UTC)
-        base = current_expiry if current_expiry and current_expiry > now else now
-        user.expires_at = base + timedelta(days=code.duration_days)
-    if user.status == "expired":
-        user.status = "active"
-    session.add(user)
-    session.commit()
-    session.refresh(user)
-
-    upstream_reactivated = True
-    upstream_message = "续期成功，媒体账号已恢复。"
-    if was_expired and user.status == "active" and user.abs_user_id:
-        try:
-            async with abs_factory() as abs_client:
-                await abs_client.update_user(user.abs_user_id, {"isActive": True})
-        except (httpx.HTTPError, TypeError, RuntimeError):
-            upstream_reactivated = False
-            upstream_message = "续期已记录，媒体账号正在自动重试恢复；无需重复兑换续期码。"
-            enqueue_reconciliation_job(
-                session,
-                idempotency_key=f"renew:{user.id}:{code.id}",
-                operation="set_active",
-                target_type="portal_user",
-                target_id=user.id,
-                abs_user_id=user.abs_user_id,
-                payload={"isActive": True, "source": "renew"},
-            )
-            session.commit()
+        raise lifecycle_http_error(exc) from exc
 
     return {
-        "user": public_user(user),
-        "redeemedCode": code.code,
-        "upstreamReactivated": upstream_reactivated,
-        "message": upstream_message,
+        "user": public_user(result["user"]),
+        "redeemedCode": result["redeemedCode"],
+        "upstreamReactivated": result["upstreamReactivated"],
+        "message": result["message"],
     }
 
 

@@ -1,784 +1,1136 @@
 'use client';
 
-import { Activity, AlertTriangle, CalendarClock, Copy, ExternalLink, Eye, LayoutGrid, Lock, KeyRound, LogOut, Power, RefreshCcw, Save, Search, Settings, ShieldCheck, Trash2, UserCog, UserPlus, Users, X } from 'lucide-react';
-import { ReactNode, useEffect, useMemo, useState } from 'react';
+import {
+  Activity,
+  Bell,
+  BookOpen,
+  CalendarClock,
+  ClipboardList,
+  Copy,
+  ExternalLink,
+  KeyRound,
+  LogOut,
+  Power,
+  RefreshCcw,
+  Save,
+  Search,
+  Settings2,
+  Trash2,
+  UserPlus,
+  Users,
+} from 'lucide-react';
+import { type ReactNode, useEffect, useMemo, useState } from 'react';
 import { AccessibleModal } from '@/components/accessible-modal';
-import { Button, LoadingScreen, Panel, PromptModal, SectionHeader, Sheet, ShellBackdrop, StatusNote, WordMark } from '@/components/ui';
-import { api, clearSession, AdminLibraryOverview, AdminUser, CodeRecord, PublicSettings } from '@/lib/api';
+import { NavDrawer } from '@/components/nav-drawer';
+import {
+  Button,
+  LoadingScreen,
+  Panel,
+  SectionHeader,
+  Sheet,
+  ShellBackdrop,
+  StatusNote,
+  WordMark,
+} from '@/components/ui';
+import {
+  AdminLibraryOverview, AdminMembership, AdminNotification, AdminOperationsOverview, AdminUser, api, AuditEntry,
+  BroadcastAudience, BroadcastPreview, clearSession, CodeRecord, MediaRequestRecord, PublicSettings,
+} from '@/lib/api';
 import { DEFAULT_ADMIN_SETTINGS, hydrateAdminSettings } from '@/lib/admin-settings';
+import { formatShanghaiDateTime } from '@/lib/datetime';
 
-const codeTypeLabels: Record<string, string> = { register: '注册邀请码', renew: '续期码' };
-const statusLabels: Record<string, string> = { active: '正常', expired: '已到期', disabled: '已停用', deleted: '需处理', pending: '待启用' };
-const defaultSettings = DEFAULT_ADMIN_SETTINGS;
-type AdminTab = 'overview' | 'codes' | 'accounts' | 'users' | 'settings';
+const requestStatusText: Record<string, string> = { pending: '待处理', accepted: '已受理', available: '已上架', rejected: '未采纳' };
+const membershipStatusText: Record<string, string> = { member: '群组成员', grace: '宽限期', disabled: '已停用' };
+type AdminTab = 'overview' | 'accounts' | 'codes' | 'operations' | 'library' | 'settings';
+type ActionField = {
+  name: string;
+  label: string;
+  type?: 'text' | 'password' | 'number' | 'textarea';
+  initial?: string;
+  required?: boolean;
+  min?: number;
+  max?: number;
+};
+type ActionDialogConfig = {
+  title: string;
+  body: string;
+  confirmText: string;
+  danger?: boolean;
+  fields?: ActionField[];
+  onSubmit: (values: Record<string, string>) => void | Promise<void>;
+};
 
 export default function AdminConfigPage() {
   const [tab, setTab] = useState<AdminTab>('overview');
-  const [durationDays, setDurationDays] = useState(30);
-  const [permanent, setPermanent] = useState(false);
-  const [count, setCount] = useState(5);
-  const [maxUses, setMaxUses] = useState(1);
-  const [type, setType] = useState('register');
-  const [codes, setCodes] = useState<CodeRecord[]>([]);
-  const [codePages, setCodePages] = useState<Record<string, number>>({ register: 1, renew: 1 });
-  const [activeCodeType, setActiveCodeType] = useState('register');
-  const [codeDeleteTarget, setCodeDeleteTarget] = useState<CodeRecord | null>(null);
-  const [settings, setSettings] = useState<PublicSettings>(defaultSettings);
-  const [bulkPreview, setBulkPreview] = useState<Awaited<ReturnType<typeof api.adminBulkExtendUserExpiryPreview>>['summary'] | null>(null);
-  const [overview, setOverview] = useState<AdminLibraryOverview | null>(null);
-  const [prompt, setPrompt] = useState<{ title: string; body: ReactNode } | null>(null);
-  const [stepsText, setStepsText] = useState(defaultSettings.sections.steps.join('\n'));
+  const [settings, setSettings] = useState<PublicSettings>(DEFAULT_ADMIN_SETTINGS);
+  const [stepsText, setStepsText] = useState('');
   const [faqText, setFaqText] = useState('');
   const [timelineText, setTimelineText] = useState('');
-  const [userQuery, setUserQuery] = useState('');
+  const [expiryReminderDaysText, setExpiryReminderDaysText] = useState('7,3,1,0');
   const [message, setMessage] = useState('正在验证管理员登录状态…');
-  const [settingsReady, setSettingsReady] = useState(false);
+  const [ready, setReady] = useState(false);
+  const [settingsRevision, setSettingsRevision] = useState('');
   const [busy, setBusy] = useState('');
-
-  // --- account management (real CRUD via portal, replaces ABS backend) ---
   const [accounts, setAccounts] = useState<AdminUser[]>([]);
   const [accountStats, setAccountStats] = useState({ total: 0, active: 0, disabled: 0, expired: 0 });
   const [upstreamAvailable, setUpstreamAvailable] = useState(true);
   const [accountQuery, setAccountQuery] = useState('');
   const [newUser, setNewUser] = useState({ username: '', password: '', durationDays: 30 });
-  const [confirm, setConfirm] = useState<{ kind: 'delete' | 'disable' | 'enable'; user: AdminUser } | null>(null);
-  const [pwTarget, setPwTarget] = useState<AdminUser | null>(null);
-  const [pwValue, setPwValue] = useState('');
-  const [expiryTarget, setExpiryTarget] = useState<AdminUser | null>(null);
-  const [bulkExpiryOpen, setBulkExpiryOpen] = useState(false);
-  const [bulkExtendDays, setBulkExtendDays] = useState(7);
+  const [codes, setCodes] = useState<CodeRecord[]>([]);
+  const [codeForm, setCodeForm] = useState({ type: 'register', durationDays: 30, count: 5, maxUses: 1 });
+  const [bulkDays, setBulkDays] = useState(7);
   const [bulkReason, setBulkReason] = useState('服务器波动补偿');
+  const [bulkPreview, setBulkPreview] = useState<Awaited<ReturnType<typeof api.adminBulkExtendUserExpiryPreview>>['summary'] | null>(null);
+  const [operationsOverview, setOperationsOverview] = useState<AdminOperationsOverview | null>(null);
+  const [requests, setRequests] = useState<MediaRequestRecord[]>([]);
+  const [notifications, setNotifications] = useState<AdminNotification[]>([]);
+  const [memberships, setMemberships] = useState<AdminMembership[]>([]);
+  const [audit, setAudit] = useState<AuditEntry[]>([]);
+  const [library, setLibrary] = useState<AdminLibraryOverview | null>(null);
+  const [inactivityPreview, setInactivityPreview] = useState<Awaited<ReturnType<typeof api.adminPreviewInactivity>> | null>(null);
+  const [requestFilter, setRequestFilter] = useState('open');
+  const [notificationFilter, setNotificationFilter] = useState('problem');
+  const [broadcastAudience, setBroadcastAudience] = useState<BroadcastAudience>('active');
+  const [broadcastMessage, setBroadcastMessage] = useState('');
+  const [broadcastPreview, setBroadcastPreview] = useState<BroadcastPreview | null>(null);
+  const [actionDialog, setActionDialog] = useState<ActionDialogConfig | null>(null);
 
-
-  const riskyUsers = useMemo(() => (overview?.users || []).filter((u) => u.inactivityCandidate), [overview]);
-  const filteredUsers = useMemo(() => {
-    const q = userQuery.trim().toLowerCase();
-    const users = overview?.users || [];
-    if (!q) return users;
-    return users.filter((u) => `${u.username} ${u.portalStatus || ''} ${u.inactivityReason || ''}`.toLowerCase().includes(q));
-  }, [overview?.users, userQuery]);
-
-  async function loadCodes() { setCodes((await api.listCodes()).codes); }
-  function hydrateSettingsForm(value: PublicSettings) {
-    const hydrated = hydrateAdminSettings(value);
-    setSettings(hydrated.settings);
-    setStepsText(hydrated.stepsText);
-    setFaqText(hydrated.faqText);
-    setTimelineText(hydrated.timelineText);
+  function hydrate(value: Partial<PublicSettings>) {
+    const result = hydrateAdminSettings(value);
+    setSettings(result.settings);
+    setStepsText(result.stepsText);
+    setFaqText(result.faqText);
+    setTimelineText(result.timelineText);
+    setExpiryReminderDaysText(result.settings.telegram.expiryReminderDays.join(','));
   }
-  async function loadSettings() {
-    setSettingsReady(false);
-    try {
-      const r = await api.getPublicSettings();
-      hydrateSettingsForm(r.settings);
-      setSettingsReady(true);
-    } catch {
-      try {
-        const fallback = await api.config();
-        hydrateSettingsForm(fallback);
-      } catch {
-        // Keep defaults visible, but never permit saving an unverified form.
-      }
-    }
-  }
-  async function refreshOverview() { setOverview(await api.adminLibraryOverview()); }
-  async function refreshAccounts() {
-    const r = await api.adminListUsers();
-    setAccounts(r.users); setAccountStats(r.stats); setUpstreamAvailable(r.upstreamAvailable);
-  }
-
-  const filteredAccounts = useMemo(() => {
-    const q = accountQuery.trim().toLowerCase();
-    if (!q) return accounts;
-    return accounts.filter((u) => `${u.username} ${u.status} ${u.email || ''}`.toLowerCase().includes(q));
-  }, [accounts, accountQuery]);
 
   useEffect(() => {
     let cancelled = false;
-    async function initAdmin() {
-      setMessage('正在加载管理台数据…');
+    async function load() {
       const session = await api.sessionStatus().catch(() => ({ authenticated: false, admin: false }));
       if (cancelled) return;
       if (!session.authenticated || !session.admin) {
         setMessage('请先登录管理员账号，正在跳转登录页…');
-        setTimeout(() => { location.href = '/admin'; }, 800);
+        window.setTimeout(() => { location.href = '/admin'; }, 700);
         return;
       }
-      const tasks = await Promise.allSettled([loadCodes(), loadSettings(), refreshOverview(), refreshAccounts()]);
+      const results = await Promise.allSettled([
+        api.getPublicSettings(),
+        api.adminListUsers(),
+        api.listCodes(),
+        api.adminOperationsOverview(),
+        api.adminRequests(),
+        api.adminNotifications(),
+        api.adminMemberships(),
+        api.adminAudit(50),
+        api.adminLibraryOverview(),
+      ]);
       if (cancelled) return;
-      const failed = tasks.filter((item) => item.status === 'rejected').length;
-      setMessage(failed ? `管理台已打开，但有 ${failed} 个模块暂时加载失败；可切换到对应页面后刷新。` : '');
+      const [settingsResult, accountsResult, codesResult] = results;
+      if (settingsResult.status === 'fulfilled') {
+        hydrate(settingsResult.value.settings);
+        setSettingsRevision(settingsResult.value.revision);
+        setReady(true);
+      } else {
+        setMessage('配置加载失败，请刷新后重试。');
+        return;
+      }
+      if (accountsResult.status === 'fulfilled') {
+        setAccounts(accountsResult.value.users);
+        setAccountStats(accountsResult.value.stats);
+        setUpstreamAvailable(accountsResult.value.upstreamAvailable);
+      }
+      if (codesResult.status === 'fulfilled') setCodes(codesResult.value.codes);
+      if (results[3].status === 'fulfilled') setOperationsOverview(results[3].value);
+      if (results[4].status === 'fulfilled') setRequests(results[4].value.items);
+      if (results[5].status === 'fulfilled') setNotifications(results[5].value.items);
+      if (results[6].status === 'fulfilled') setMemberships(results[6].value.items);
+      if (results[7].status === 'fulfilled') setAudit(results[7].value.items);
+      if (results[8].status === 'fulfilled') setLibrary(results[8].value);
+      const failed = results.filter((item) => item.status === 'rejected').length;
+      setMessage(failed ? `管理台已打开，但有 ${failed} 个模块加载失败。` : '');
     }
-    void initAdmin();
+    void load();
     return () => { cancelled = true; };
   }, []);
-
-
   useEffect(() => {
-    const scrollTarget = document.querySelector('main');
-    scrollTarget?.scrollTo({ top: 0, behavior: 'smooth' });
-  }, [tab]);
+    const saved = window.sessionStorage.getItem('moyin-admin-tab');
+    if (saved && ['overview', 'accounts', 'codes', 'operations', 'library', 'settings'].includes(saved)) setTab(saved as AdminTab);
+  }, []);
+  useEffect(() => { window.sessionStorage.setItem('moyin-admin-tab', tab); }, [tab]);
 
-  useEffect(() => {
-    if (!message || message.includes('正在') || message.includes('请先')) return;
-    const timer = window.setTimeout(() => setMessage(''), 2800);
-    return () => window.clearTimeout(timer);
-  }, [message]);
+  const filteredAccounts = useMemo(() => {
+    const query = accountQuery.trim().toLowerCase();
+    if (!query) return accounts;
+    return accounts.filter((user) => `${user.username} ${user.email || ''} ${user.status}`.toLowerCase().includes(query));
+  }, [accounts, accountQuery]);
 
-  // --- account mutations ---
+  const filteredRequests = useMemo(() => requests.filter((item) => {
+    if (requestFilter === 'all') return true;
+    if (requestFilter === 'open') return ['pending', 'accepted'].includes(item.status);
+    return item.status === requestFilter;
+  }), [requests, requestFilter]);
+
+  const filteredNotifications = useMemo(() => notifications.filter((item) => {
+    if (notificationFilter === 'all') return true;
+    if (notificationFilter === 'problem') return ['pending', 'retry', 'sending', 'failed'].includes(item.status);
+    return item.status === notificationFilter;
+  }), [notifications, notificationFilter]);
+
+  async function refreshAccounts() {
+    const response = await api.adminListUsers();
+    setAccounts(response.users);
+    setAccountStats(response.stats);
+    setUpstreamAvailable(response.upstreamAvailable);
+  }
+
   async function createAccount() {
-    if (!newUser.username.trim() || !newUser.password.trim()) { setMessage('请填写用户名和密码'); return; }
-    if (newUser.password.length < settings.passwordMinLength) { setMessage(`密码至少需要 ${settings.passwordMinLength} 位。`); return; }
-    if (newUser.durationDays < 0 || newUser.durationDays > 3650) { setMessage('有效天数必须在 0 到 3650 之间。'); return; }
-    const usernameToCreate = newUser.username.trim();
-    const initialPassword = newUser.password;
-    const durationDays = newUser.durationDays;
-    setMessage(''); setBusy('createUser');
-    try {
-      await api.adminCreateUser({ username: usernameToCreate, password: initialPassword, durationDays });
-      setNewUser({ username: '', password: '', durationDays: 30 });
-      await refreshAccounts();
-      setPrompt({
-        title: '账号已创建',
-        body: <DeliveryCard username={usernameToCreate} password={initialPassword} serverUrl={settings.client.serverUrl || 'https://listen.moyin.cc'} />,
-      });
-    } catch (err) { setMessage(err instanceof Error ? err.message : '创建失败'); }
-    finally { setBusy(''); }
-  }
-  async function submitPassword() {
-    if (!pwTarget || !pwValue.trim()) return;
-    if (pwValue.length < settings.passwordMinLength) { setMessage(`密码至少需要 ${settings.passwordMinLength} 位。`); return; }
-    setBusy('pw');
-    try { await api.adminSetUserPassword(pwTarget.id, pwValue); setMessage(`已重置 ${pwTarget.username} 的密码`); setPwTarget(null); setPwValue(''); await refreshAccounts(); }
-    catch (err) { setMessage(err instanceof Error ? err.message : '改密失败'); }
-    finally { setBusy(''); }
-  }
-  async function submitExpiry(payload: { extendDays?: number; clear?: boolean; expiresAt?: string }) {
-    if (!expiryTarget) return;
-    setBusy('expiry');
-    try { await api.adminSetUserExpiry(expiryTarget.id, payload); setMessage(`已更新 ${expiryTarget.username} 的有效期`); setExpiryTarget(null); await refreshAccounts(); }
-    catch (err) { setMessage(err instanceof Error ? err.message : '更新有效期失败'); }
-    finally { setBusy(''); }
-  }
-  async function openBulkExpiryPreview() {
-    const days = Math.trunc(Number(bulkExtendDays) || 0);
-    if (days <= 0) { setMessage('批量补偿天数必须大于 0'); return; }
-    setBulkExpiryOpen(true);
-    setBulkPreview(null);
-    try {
-      const r = await api.adminBulkExtendUserExpiryPreview({ extendDays: days });
-      setBulkPreview(r.summary);
-    } catch (err) {
-      setMessage(err instanceof Error ? err.message : '批量预览失败');
-    }
-  }
-  async function submitBulkExpiry() {
-    const days = Math.trunc(Number(bulkExtendDays) || 0);
-    if (days <= 0) { setMessage('批量补偿天数必须大于 0'); return; }
-    setBusy('bulkExpiry');
-    try {
-      const r = await api.adminBulkExtendUserExpiry({ extendDays: days, reason: bulkReason.trim() || undefined });
-      setMessage(`批量操作完成：已为 ${r.summary.updated} 个普通用户增加 ${days} 天有效期，恢复 ${r.summary.reactivated} 个到期账号，跳过 ${r.summary.skippedAdmins} 个管理员。`);
-      setBulkExpiryOpen(false);
-      await refreshAccounts();
-    } catch (err) { setMessage(err instanceof Error ? err.message : '批量操作失败'); }
-    finally { setBusy(''); }
-  }
-  async function runConfirm() {
-    if (!confirm) return;
-    const { kind, user } = confirm; setBusy('confirm');
-    try {
-      if (kind === 'delete') { await api.adminDeleteUser(user.id); setMessage(`已删除账号 ${user.username}`); }
-      else { await api.adminSetUserStatus(user.id, kind); setMessage(`已${kind === 'enable' ? '启用' : '停用'} ${user.username}`); }
-      setConfirm(null); await refreshAccounts();
-    } catch (err) { setMessage(err instanceof Error ? err.message : '操作失败'); }
-    finally { setBusy(''); }
-  }
-
-
-  async function createCodes() {
-    const safeCount = Math.max(1, Math.min(100, Math.trunc(Number(count) || 1)));
-    const safeMaxUses = Math.max(1, Math.min(10000, Math.trunc(Number(maxUses) || 1)));
-    const safeDurationDays = permanent ? 0 : Math.max(1, Math.min(3650, Math.trunc(Number(durationDays) || 1)));
-    setMessage(''); setBusy('codes');
-    try {
-      const r = await api.createCodes({ type, durationDays: safeDurationDays, count: safeCount, maxUses: safeMaxUses, note: permanent ? '永久卡密' : safeMaxUses > 1 ? `可用 ${safeMaxUses} 次` : 'admin generated' });
-      setCodes([...r.codes, ...codes]); setCodePages({ register: 1, renew: 1 }); setMessage(`生成 ${r.codes.length} 个${permanent ? '永久' : ''}卡密${safeMaxUses > 1 ? `，每个可用 ${safeMaxUses} 次` : ''}`);
-    } catch (err) { setMessage(err instanceof Error ? err.message : '生成失败，请先登录管理员账号'); }
-    finally { setBusy(''); }
-  }
-  async function copyCode(code: string) {
-    try {
-      await navigator.clipboard.writeText(code);
-      setPrompt({ title: '卡密已复制', body: <>已复制卡密 <code>{code}</code>，可以直接粘贴发送给用户。</> });
-    } catch {
-      setPrompt({ title: '复制失败', body: <>浏览器没有允许自动复制，请长按卡密 <code>{code}</code> 手动复制。</> });
-    }
-  }
-  async function toggleCodeStatus(code: CodeRecord) {
-    setMessage(''); setBusy(`code-${code.id}`);
-    try {
-      const next = code.status === 'disabled' ? 'active' : 'disabled';
-      const r = await api.updateCodeStatus(code.id, next);
-      setCodes(codes.map((item) => item.id === code.id ? r.code : item));
-      setMessage(`${next === 'disabled' ? '已禁用' : '已启用'}卡密 ${code.code}`);
-    } catch (err) { setMessage(err instanceof Error ? err.message : '卡密状态更新失败'); }
-    finally { setBusy(''); }
-  }
-  async function deleteCode() {
-    if (!codeDeleteTarget) return;
-    setBusy(`delete-code-${codeDeleteTarget.id}`);
-    try {
-      await api.deleteCode(codeDeleteTarget.id);
-      setCodes(codes.filter((item) => item.id !== codeDeleteTarget.id));
-      setMessage(`已删除卡密 ${codeDeleteTarget.code}`);
-      setCodeDeleteTarget(null);
-    } catch (err) { setMessage(err instanceof Error ? err.message : '删除卡密失败'); }
-    finally { setBusy(''); }
-  }
-  async function saveSettings() {
-    if (!settingsReady) {
-      setMessage('管理配置未完整加载，已禁止保存以避免覆盖现有内容。请刷新后重试。');
+    if (!newUser.username.trim() || !newUser.password) {
+      setMessage('请填写用户名和初始密码。');
       return;
     }
-    setMessage(''); setBusy('settings');
-    const faq = faqText.split('\n').map((line) => line.trim()).filter(Boolean).map((line) => { const [q, ...rest] = line.split('|'); return { q: q.trim(), a: rest.join('|').trim() }; }).filter((item) => item.q && item.a);
-    const timeline = timelineText.split('\n').map((line) => line.trim()).filter(Boolean).map((line) => { const [date, ...rest] = line.split('|'); return { date: date.trim(), body: rest.join('|').trim() }; }).filter((item) => item.body);
+    setBusy('create-account');
+    try {
+      await api.adminCreateUser({
+        username: newUser.username.trim(),
+        password: newUser.password,
+        durationDays: newUser.durationDays,
+      });
+      setNewUser({ username: '', password: '', durationDays: 30 });
+      await refreshAccounts();
+      setMessage('账号已创建。');
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : '账号创建失败。');
+    } finally {
+      setBusy('');
+    }
+  }
+
+  function resetAccountPassword(user: AdminUser) {
+    setActionDialog({
+      title: `重置 ${user.username} 的密码`,
+      body: '新密码会同步到媒体服务器。提交后旧密码立即失效。',
+      confirmText: '确认重置',
+      fields: [{ name: 'password', label: '新密码', type: 'password', required: true }],
+      onSubmit: async ({ password }) => {
+        setActionDialog(null);
+        await performPasswordReset(user, password);
+      },
+    });
+  }
+
+  async function performPasswordReset(user: AdminUser, password: string) {
+    setBusy(`password-${user.id}`);
+    try {
+      await api.adminSetUserPassword(user.id, password);
+      setMessage(`已重置 ${user.username} 的密码。`);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : '密码重置失败。');
+    } finally {
+      setBusy('');
+    }
+  }
+
+  function extendAccount(user: AdminUser) {
+    setActionDialog({
+      title: `为 ${user.username} 续期`,
+      body: '续期以当前有效期为基准；已过期账号从现在开始计算。',
+      confirmText: '确认续期',
+      fields: [{ name: 'days', label: '增加天数', type: 'number', initial: '30', required: true, min: 1, max: 3650 }],
+      onSubmit: async ({ days }) => {
+        setActionDialog(null);
+        await performAccountExtension(user, Number.parseInt(days, 10));
+      },
+    });
+  }
+
+  async function performAccountExtension(user: AdminUser, days: number) {
+    if (!Number.isInteger(days) || days < 1 || days > 3650) {
+      setMessage('有效天数必须是 1-3650 的整数。');
+      return;
+    }
+    setBusy(`expiry-${user.id}`);
+    try {
+      await api.adminSetUserExpiry(user.id, { extendDays: days });
+      await refreshAccounts();
+      setMessage(`已为 ${user.username} 增加 ${days} 天。`);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : '有效期更新失败。');
+    } finally {
+      setBusy('');
+    }
+  }
+
+  function toggleAccount(user: AdminUser) {
+    const action = user.status === 'disabled' ? 'enable' : 'disable';
+    setActionDialog({
+      title: `${action === 'enable' ? '启用' : '停用'}账号`,
+      body: `${user.username} 将${action === 'enable' ? '恢复使用权限' : '无法继续访问媒体库'}。`,
+      confirmText: `确认${action === 'enable' ? '启用' : '停用'}`,
+      danger: action === 'disable',
+      onSubmit: async () => {
+        setActionDialog(null);
+        await performAccountToggle(user, action);
+      },
+    });
+  }
+
+  async function performAccountToggle(user: AdminUser, action: 'enable' | 'disable') {
+    setBusy(`status-${user.id}`);
+    try {
+      await api.adminSetUserStatus(user.id, action);
+      await refreshAccounts();
+      setMessage(`已${action === 'enable' ? '启用' : '停用'} ${user.username}。`);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : '账号状态更新失败。');
+    } finally {
+      setBusy('');
+    }
+  }
+
+  function deleteAccount(user: AdminUser) {
+    setActionDialog({
+      title: `删除账号 ${user.username}`,
+      body: '此操作会同步删除媒体服务器账号。请输入用户名确认，避免误删。',
+      confirmText: '永久删除',
+      danger: true,
+      fields: [{ name: 'confirmation', label: `输入 ${user.username}`, required: true }],
+      onSubmit: async ({ confirmation }) => {
+        if (confirmation !== user.username) {
+          setMessage('用户名不匹配，未执行删除。');
+          return;
+        }
+        setActionDialog(null);
+        await performAccountDeletion(user);
+      },
+    });
+  }
+
+  async function performAccountDeletion(user: AdminUser) {
+    setBusy(`delete-${user.id}`);
+    try {
+      await api.adminDeleteUser(user.id);
+      await refreshAccounts();
+      setMessage(`已删除账号 ${user.username}。`);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : '账号删除失败。');
+    } finally {
+      setBusy('');
+    }
+  }
+
+  async function previewBulkExpiry() {
+    setBusy('bulk-preview');
+    try {
+      const response = await api.adminBulkExtendUserExpiryPreview({ extendDays: bulkDays });
+      setBulkPreview(response.summary);
+      setMessage(`预计为 ${response.summary.affected} 个账号增加 ${bulkDays} 天。`);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : '批量补偿预览失败。');
+    } finally {
+      setBusy('');
+    }
+  }
+
+  function applyBulkExpiry() {
+    if (!bulkPreview) return;
+    setActionDialog({
+      title: '确认批量补偿',
+      body: `将给 ${bulkPreview.affected} 个账号增加 ${bulkDays} 天。原因：${bulkReason.trim() || '未填写'}。`,
+      confirmText: '确认执行',
+      onSubmit: async () => {
+        setActionDialog(null);
+        await performBulkExpiry();
+      },
+    });
+  }
+
+  async function performBulkExpiry() {
+    setBusy('bulk-apply');
+    try {
+      const response = await api.adminBulkExtendUserExpiry({ extendDays: bulkDays, reason: bulkReason.trim() || undefined });
+      setBulkPreview(null);
+      await refreshAccounts();
+      setMessage(`批量补偿完成：更新 ${response.summary.updated} 个账号。`);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : '批量补偿失败。');
+    } finally {
+      setBusy('');
+    }
+  }
+
+  async function createCodes() {
+    setBusy('create-codes');
+    try {
+      const response = await api.createCodes(codeForm);
+      setCodes([...response.codes, ...codes]);
+      setMessage(`已生成 ${response.codes.length} 个卡密。`);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : '卡密生成失败。');
+    } finally {
+      setBusy('');
+    }
+  }
+
+  async function toggleCode(code: CodeRecord) {
+    const status = code.status === 'disabled' ? 'active' : 'disabled';
+    setBusy(`code-${code.id}`);
+    try {
+      const response = await api.updateCodeStatus(code.id, status);
+      setCodes(codes.map((item) => item.id === code.id ? response.code : item));
+      setMessage(`卡密已${status === 'active' ? '启用' : '禁用'}。`);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : '卡密状态更新失败。');
+    } finally {
+      setBusy('');
+    }
+  }
+
+  function deleteCode(code: CodeRecord) {
+    setActionDialog({
+      title: '删除未使用卡密',
+      body: `即将删除 ${code.code}。已有兑换记录的卡密会被服务端拒绝删除。`,
+      confirmText: '确认删除',
+      danger: true,
+      onSubmit: async () => {
+        setActionDialog(null);
+        await performCodeDeletion(code);
+      },
+    });
+  }
+
+  async function performCodeDeletion(code: CodeRecord) {
+    setBusy(`delete-code-${code.id}`);
+    try {
+      await api.deleteCode(code.id);
+      setCodes(codes.filter((item) => item.id !== code.id));
+      setMessage('卡密已删除。');
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : '卡密删除失败。');
+    } finally {
+      setBusy('');
+    }
+  }
+
+  async function refreshOperations() {
+    const results = await Promise.all([
+      api.adminOperationsOverview(), api.adminRequests(), api.adminNotifications(), api.adminMemberships(), api.adminAudit(50),
+    ]);
+    setOperationsOverview(results[0]);
+    setRequests(results[1].items);
+    setNotifications(results[2].items);
+    setMemberships(results[3].items);
+    setAudit(results[4].items);
+  }
+
+  function updateMediaRequest(item: MediaRequestRecord, status: 'accepted' | 'available' | 'rejected') {
+    const labels = { accepted: '受理', available: '标记为已上架', rejected: '拒绝' };
+    setActionDialog({
+      title: `${labels[status]}《${item.title}》`,
+      body: '状态更新后，已绑定 Telegram 的用户会收到通知。',
+      confirmText: `确认${labels[status]}`,
+      danger: status === 'rejected',
+      fields: [{ name: 'note', label: '管理员备注（可留空）', type: 'textarea', initial: item.adminNote || '' }],
+      onSubmit: async ({ note }) => {
+        setActionDialog(null);
+        await performMediaRequestUpdate(item, status, note.trim() || undefined);
+      },
+    });
+  }
+
+  async function performMediaRequestUpdate(item: MediaRequestRecord, status: 'accepted' | 'available' | 'rejected', note?: string) {
+    setBusy(`request-${item.id}`);
+    try {
+      const response = await api.adminUpdateRequest(item.id, status, note);
+      setRequests((current) => current.map((entry) => entry.id === item.id ? response.item : entry));
+      setOperationsOverview(await api.adminOperationsOverview());
+      setMessage('工单状态已更新，已绑定 Telegram 的用户会收到通知。');
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : '工单更新失败。');
+    } finally {
+      setBusy('');
+    }
+  }
+
+  async function retryNotification(item: AdminNotification) {
+    setBusy(`notification-${item.id}`);
+    try {
+      await api.adminRetryNotification(item.id);
+      setNotifications((current) => current.map((entry) => entry.id === item.id ? { ...entry, status: 'retry', lastError: null } : entry));
+      setMessage('通知已重新进入发送队列。');
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : '通知重试失败。');
+    } finally {
+      setBusy('');
+    }
+  }
+
+  async function previewBroadcast() {
+    if (!broadcastMessage.trim()) {
+      setMessage('请先填写广播内容。');
+      return;
+    }
+    setBusy('broadcast-preview');
+    try {
+      const result = await api.adminPreviewBroadcast(broadcastAudience);
+      setBroadcastPreview(result);
+      setMessage(`广播预览完成：将向 ${result.count} 个已绑定用户发送。`);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : '广播预览失败。');
+    } finally {
+      setBusy('');
+    }
+  }
+
+  function sendBroadcast() {
+    if (!broadcastPreview || broadcastPreview.audience !== broadcastAudience) return;
+    setActionDialog({
+      title: '确认广播入队',
+      body: `这条消息将加入 ${broadcastPreview.count} 个用户的发送队列。发送后无法撤回。`,
+      confirmText: '确认加入队列',
+      danger: true,
+      onSubmit: async () => {
+        setActionDialog(null);
+        await performBroadcast();
+      },
+    });
+  }
+
+  async function performBroadcast() {
+    if (!broadcastPreview || broadcastPreview.audience !== broadcastAudience) return;
+    setBusy('broadcast-send');
+    try {
+      const result = await api.adminCreateBroadcast({
+        audience: broadcastAudience,
+        message: broadcastMessage.trim(),
+        confirmCount: broadcastPreview.count,
+        idempotencyKey: crypto.randomUUID(),
+      });
+      setBroadcastMessage('');
+      setBroadcastPreview(null);
+      await refreshOperations();
+      setMessage(`广播已入队，共 ${result.queued} 条；发送结果可在通知队列查看。`);
+    } catch (error) {
+      setBroadcastPreview(null);
+      setMessage(error instanceof Error ? error.message : '广播入队失败，请重新预览。');
+    } finally {
+      setBusy('');
+    }
+  }
+
+  async function previewInactivity() {
+    setBusy('inactivity-preview');
+    try {
+      const result = await api.adminPreviewInactivity();
+      setInactivityPreview(result);
+      setMessage(`已检查 ${result.checked} 个账号，发现 ${result.candidates.length} 个停用候选；本次仅预览，不会停用账号。`);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : '不活跃账号预览失败。');
+    } finally {
+      setBusy('');
+    }
+  }
+
+  function adjustPoints(user: AdminUser) {
+    setActionDialog({
+      title: `调整 ${user.username} 的积分`,
+      body: '正数增加、负数扣除；操作原因会进入审计日志。',
+      confirmText: '确认调整',
+      fields: [
+        { name: 'amount', label: '积分变化', type: 'number', initial: '10', required: true },
+        { name: 'note', label: '操作原因', required: true },
+      ],
+      onSubmit: async ({ amount, note }) => {
+        setActionDialog(null);
+        await performPointsAdjustment(user, Number.parseInt(amount, 10), note);
+      },
+    });
+  }
+
+  async function performPointsAdjustment(user: AdminUser, amount: number, note: string) {
+    if (!Number.isInteger(amount) || amount === 0) {
+      setMessage('积分调整必须是非零整数。');
+      return;
+    }
+    if (!note.trim()) return;
+    setBusy(`points-${user.id}`);
+    try {
+      const result = await api.adminAdjustPoints({ userId: user.id, amount, note: note.trim() });
+      setMessage(`已调整 ${user.username} 的积分，当前余额 ${result.balance}。`);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : '积分调整失败。');
+    } finally {
+      setBusy('');
+    }
+  }
+
+  async function saveSettings() {
+    if (!ready) {
+      setMessage('配置尚未完整加载，已禁止保存。请刷新后重试。');
+      return;
+    }
+    const faq = faqText
+      .split('\n')
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .map((line) => {
+        const [q, ...answer] = line.split('|');
+        return { q: q.trim(), a: answer.join('|').trim() };
+      })
+      .filter((item) => item.q && item.a);
+    const timeline = timelineText
+      .split('\n')
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .map((line) => {
+        const [date, ...body] = line.split('|');
+        return { date: date.trim(), body: body.join('|').trim() };
+      })
+      .filter((item) => item.body);
+    const expiryReminderDays = [...new Set(
+      expiryReminderDaysText
+        .split(',')
+        .map((item) => Number.parseInt(item.trim(), 10))
+        .filter((day) => Number.isInteger(day) && day >= 0 && day <= 365),
+    )].sort((a, b) => b - a);
     const payload: Partial<PublicSettings> = {
-      ...settings,
-      copy: { ...settings.copy, notice: settings.copy.notice.trim() || '一处安静、专注的声音栖地。' },
+      siteName: settings.siteName,
+      tagline: settings.tagline,
+      copy: {
+        ...settings.copy,
+        notice: settings.copy.notice.trim() || '一处安静、专注的声音栖地。',
+      },
       client: {
         ...settings.client,
         iosGuideText: settings.client.iosGuideText.trim() || '在 App Store 搜索“EchoShelf”并安装。',
         desktopGuideText: settings.client.desktopGuideText.trim() || '暂无稳定方案，建议使用手机或平板。',
       },
       announcement: { ...settings.announcement, timeline },
-      sections: { ...settings.sections, steps: stepsText.split('\n').map((s) => s.trim()).filter(Boolean), faq },
-      features: { ...settings.features, showLibraryEntry: false },
-      links: { ...settings.links, libraryUrl: '' },
+      operations: { ...settings.operations },
+      telegram: { ...settings.telegram, expiryReminderDays },
+      sections: {
+        ...settings.sections,
+        steps: stepsText.split('\n').map((item) => item.trim()).filter(Boolean),
+        faq,
+      },
+      features: { ...settings.features },
+      links: { ...settings.links },
     };
-    try { const r = await api.updatePublicSettings(payload); hydrateSettingsForm(r.settings); setMessage('设置已保存'); await refreshOverview(); }
-    catch (err) { setMessage(err instanceof Error ? err.message : '保存失败，请确认管理员登录状态'); }
-    finally { setBusy(''); }
+    setBusy('save');
+    setMessage('');
+    try {
+      const response = await api.updatePublicSettings(payload, settingsRevision);
+      hydrate(response.settings);
+      setSettingsRevision(response.revision);
+      setMessage('设置已保存。');
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : '保存失败，请确认管理员登录状态。');
+    } finally {
+      setBusy('');
+    }
   }
-  async function runInactivityCheck() {
-    setMessage('正在执行活跃度巡检…'); setBusy('inactivity');
-    try { const r = await api.runInactivityCheck(); hydrateSettingsForm(r.settings); setMessage(`巡检完成：检查 ${r.result.checked} 个账号，处理 ${r.result.disabled} 个账号`); await refreshOverview(); }
-    catch (err) { setMessage(err instanceof Error ? err.message : '巡检失败'); }
-    finally { setBusy(''); }
-  }
-  async function logout() { setBusy('logout'); try { await clearSession(); } finally { location.href = '/admin'; } }
 
-  const noteTone = message.includes('失败') || message.includes('请先') ? 'warning' : message.includes('保存') || message.includes('生成') || message.includes('完成') || message.includes('复制') || message.includes('删除') || message.includes('禁用') || message.includes('启用') ? 'success' : 'neutral';
-  const codeGroups = [
-    { type: 'register', label: '注册邀请码', body: '新用户注册开通' },
-    { type: 'renew', label: '续期码', body: '已有账号延长有效期' },
-  ].map((group) => {
-    const all = codes.filter((code) => code.type === group.type);
-    const pageSize = 10;
-    const totalPages = Math.max(1, Math.ceil(all.length / pageSize));
-    const page = Math.min(codePages[group.type] || 1, totalPages);
-    const visible = all.slice((page - 1) * pageSize, page * pageSize);
-    return { ...group, all, visible, page, totalPages };
-  });
-  const activeCodeGroup = codeGroups.find((group) => group.type === activeCodeType) || codeGroups[0];
+  async function logout() {
+    setBusy('logout');
+    try {
+      await clearSession();
+    } finally {
+      location.href = '/admin';
+    }
+  }
+
+  const telegram = settings.telegram;
 
   return (
-    <ShellBackdrop className="w-full px-3 pb-40 pt-5 sm:px-6 sm:pt-7 lg:pb-8">
+    <ShellBackdrop className="w-full px-3 pb-8 pt-5 sm:px-6 sm:pt-7">
       {busy === 'logout' && <LoadingScreen title="正在退出" subtitle="console" />}
-      <div className="app-content w-full">
-        {/* header — only on overview; compact brand + logout + stats */}
-        {tab === 'overview' && (
-          <header className="admin-overview-hero sheet rounded-[20px] p-5 sm:p-6">
-            <div className="flex flex-row items-center justify-between gap-3">
-              <WordMark siteName={settings.siteName} tagline="管理台" small />
-              <Button variant="secondary" className="shrink-0" loading={busy === 'logout'} loadingText="退出中" onClick={logout}><LogOut size={15} /> 退出登录</Button>
+      <NavDrawer
+        active={tab}
+        onSelect={setTab}
+        title={settings.siteName}
+        subtitle="运营管理中心"
+        ariaLabel="管理台栏目导航"
+        items={[
+          { key: 'overview', label: '运营总览', description: '状态、任务与核心指标', icon: <Activity size={19} /> },
+          { key: 'accounts', label: '账号管理', description: '账号、有效期与积分', icon: <Users size={19} /> },
+          { key: 'codes', label: '卡密管理', description: '邀请码与续期码', icon: <KeyRound size={19} /> },
+          { key: 'operations', label: '工单通知', description: '请求、广播与发送队列', icon: <ClipboardList size={19} />, badge: operationsOverview?.pendingRequests ? String(operationsOverview.pendingRequests) : undefined },
+          { key: 'library', label: '媒体库', description: '资源与收听活动', icon: <BookOpen size={19} /> },
+          { key: 'settings', label: '站点配置', description: '功能开关与页面内容', icon: <Settings2 size={19} /> },
+        ]}
+      />
+      <div className="app-content mx-auto w-full max-w-6xl">
+        <header className="sheet rounded-[20px] p-5 sm:p-6">
+          <div className="flex flex-wrap items-center justify-between gap-4">
+            <WordMark siteName={settings.siteName} tagline="管理台" small />
+            <div className="flex gap-2">
+              <Button variant="secondary" loading={busy === 'logout'} onClick={logout}>
+                <LogOut size={15} /> 退出
+              </Button>
+              {tab === 'settings' && (
+                <Button variant="claret" loading={busy === 'save'} loadingText="保存中" disabled={!ready} onClick={saveSettings}>
+                  <Save size={15} /> 保存设置
+                </Button>
+              )}
             </div>
-            <div className="mt-5 grid grid-cols-2 gap-2.5 sm:grid-cols-3">
-              <DarkStatLight label="门户用户" value={`${overview?.stats.portalUserCount ?? 0} 个`} />
-              <DarkStatLight label="启用账号" value={`${overview?.stats.activeUserCount ?? 0} 个`} />
-              <DarkStatLight label="待关注" value={`${overview?.stats.inactiveCandidateCount ?? 0} 个`} />
-            </div>
-          </header>
-        )}
-        {message && <div className={tab === 'overview' ? 'mt-4' : 'mt-0'}><StatusNote tone={noteTone}>{message}</StatusNote></div>}
+          </div>
+          <div className="mt-5 flex items-start gap-3 rounded-[16px] border border-[rgba(0,190,227,.22)] bg-[rgba(0,190,227,.08)] p-4">
+            <Settings2 className="mt-0.5 shrink-0 text-[var(--primary)]" size={18} />
+            <p className="text-sm leading-6 text-[var(--muted-foreground)]">
+              Web 管理端负责账号 CRUD、卡密、批量补偿和站点配置；Telegram Bot 负责移动端用户状态操作与工单处理，不再生成卡密。
+            </p>
+          </div>
+        </header>
 
-        {/* OVERVIEW */}
+        {message && (
+          <div className="mt-4">
+            <StatusNote tone={message.includes('失败') || message.includes('禁止') ? 'warning' : 'success'}>{message}</StatusNote>
+          </div>
+        )}
+
         {tab === 'overview' && (
           <div className="mt-5 grid gap-5">
             <Sheet className="rounded-[20px] p-6 sm:p-7">
-              <SectionHeader eyebrow="运营概览" title="运营驾驶舱" body="集中查看用户规模、近期收听情况和自动巡检结果。" />
-              <Panel className="mt-6 rounded-[16px] p-5">
-                <div className="flex items-center gap-2 font-display font-semibold"><Activity size={18} /> 运营建议</div>
-                <ul className="mt-3 space-y-2 text-sm leading-6 text-[var(--muted-foreground)]">
-                  <li>· 在「用户」页按用户名或状态搜索，优先处理待关注账号。</li>
-                  <li>· 在「配置」页维护首页文案、客户端步骤与客服入口，减少重复沟通。</li>
-                  <li>· 巡检策略只处理符合条件的账号，续期后可恢复。</li>
-                </ul>
+              <div className="flex flex-wrap items-start justify-between gap-4">
+                <SectionHeader eyebrow="运营总览" title="账号与自动化状态" body="集中查看账号、工单、通知、群组和后台任务是否正常。" />
+                <Button variant="secondary" loading={busy === 'refresh-operations'} onClick={async () => { setBusy('refresh-operations'); try { await refreshOperations(); } finally { setBusy(''); } }}><RefreshCcw size={15} /> 刷新</Button>
+              </div>
+              <div className="mt-6 grid grid-cols-2 gap-3 lg:grid-cols-4">
+                <StatCard label="正常账号" value={operationsOverview?.users.active ?? 0} />
+                <StatCard label="待处理工单" value={operationsOverview?.pendingRequests ?? 0} />
+                <StatCard label="失败通知" value={operationsOverview?.notifications.failed ?? 0} />
+                <StatCard label="退群宽限" value={operationsOverview?.groupGrace ?? 0} />
+              </div>
+            </Sheet>
+            <div className="grid gap-5 lg:grid-cols-3">
+              <Panel className="rounded-[20px] p-5"><p className="text-sm text-[var(--muted-foreground)]">后台任务</p><p className="mt-2 font-display text-2xl font-semibold">{operationsOverview?.worker.healthy ? '运行正常' : '需要检查'}</p><p className="mt-2 text-xs leading-5 text-[var(--muted-foreground)]">{operationsOverview?.worker.healthy ? `最近心跳延迟 ${Math.round(operationsOverview.worker.lagSeconds || 0)} 秒` : operationsOverview?.worker.reason || '尚无状态'}</p></Panel>
+              <Panel className="rounded-[20px] p-5"><p className="text-sm text-[var(--muted-foreground)]">积分与邀请</p><p className="mt-2 font-display text-2xl font-semibold">{operationsOverview?.pointAccounts ?? 0} 个积分账号</p><p className="mt-2 text-xs text-[var(--muted-foreground)]">累计生成邀请 {operationsOverview?.referrals ?? 0} 个</p></Panel>
+              <Panel className="rounded-[20px] p-5"><p className="text-sm text-[var(--muted-foreground)]">媒体库同步</p><p className="mt-2 font-display text-2xl font-semibold">{library?.stats.libraryCount ?? 0} 个媒体库</p><p className="mt-2 text-xs text-[var(--muted-foreground)]">{library?.stats.activeUserCount ?? 0}/{library?.stats.upstreamUserCount ?? 0} 个上游账号启用</p></Panel>
+            </div>
+            <Panel className="rounded-[20px] p-5">
+              <div className="flex flex-wrap items-center justify-between gap-3"><div><p className="font-display text-lg font-semibold">不活跃账号策略</p><p className="mt-1 text-sm text-[var(--muted-foreground)]">当前为{settings.operations.inactivityAutoDisable ? '自动停用' : '仅监控'}，阈值 {settings.operations.inactiveDays} 天，新账号宽限 {settings.operations.newUserGraceDays} 天。</p></div><Button variant="secondary" loading={busy === 'inactivity-preview'} onClick={previewInactivity}>立即预览</Button></div>
+            </Panel>
+          </div>
+        )}
+
+        {tab === 'accounts' && (
+          <div className="mt-5 grid gap-5">
+            <Sheet className="rounded-[20px] p-6 sm:p-7">
+              <div className="flex flex-wrap items-start justify-between gap-4">
+                <SectionHeader eyebrow="账号管理" title="Portal 与媒体账号" body="创建、启停、改密、调整有效期及删除账号。" />
+                <Button variant="secondary" loading={busy === 'refresh-accounts'} onClick={async () => { setBusy('refresh-accounts'); try { await refreshAccounts(); } finally { setBusy(''); } }}><RefreshCcw size={15} /> 刷新</Button>
+              </div>
+              {!upstreamAvailable && <div className="mt-4"><StatusNote tone="warning">媒体服务器暂时不可用，部分同步状态可能不准确。</StatusNote></div>}
+              <div className="mt-6 grid grid-cols-2 gap-3 sm:grid-cols-4">
+                <StatCard label="全部" value={accountStats.total} />
+                <StatCard label="正常" value={accountStats.active} />
+                <StatCard label="已到期" value={accountStats.expired} />
+                <StatCard label="已停用" value={accountStats.disabled} />
+              </div>
+            </Sheet>
+
+            <div className="grid gap-5 lg:grid-cols-2">
+              <Panel className="rounded-[20px] p-5">
+                <h3 className="font-display text-lg font-semibold"><UserPlus className="mr-2 inline" size={18} />创建账号</h3>
+                <div className="mt-4 grid gap-4 sm:grid-cols-2">
+                  <Text label="用户名" value={newUser.username} onChange={(value) => setNewUser({ ...newUser, username: value })} />
+                  <Text label="初始密码" type="password" value={newUser.password} onChange={(value) => setNewUser({ ...newUser, password: value })} />
+                  <NumberInput label="有效天数（0 为永久）" value={newUser.durationDays} min={0} max={3650} onChange={(value) => setNewUser({ ...newUser, durationDays: value })} />
+                </div>
+                <Button variant="claret" className="mt-5 w-full" loading={busy === 'create-account'} loadingText="创建中" onClick={createAccount}><UserPlus size={15} /> 创建账号</Button>
               </Panel>
+
+              <Panel className="rounded-[20px] p-5">
+                <h3 className="font-display text-lg font-semibold"><CalendarClock className="mr-2 inline" size={18} />批量补偿有效期</h3>
+                <div className="mt-4 grid gap-4 sm:grid-cols-2">
+                  <NumberInput label="增加天数" value={bulkDays} min={1} max={3650} onChange={(value) => { setBulkDays(value); setBulkPreview(null); }} />
+                  <Text label="操作备注" value={bulkReason} onChange={setBulkReason} />
+                </div>
+                {bulkPreview && (
+                  <div className="mt-4 rounded-xl border border-[rgba(0,190,227,.25)] bg-[rgba(0,190,227,.08)] p-4 text-sm leading-6">
+                    预计修改 <b>{bulkPreview.affected}</b> 个账号；其中可恢复到期账号 <b>{bulkPreview.reactivatable}</b> 个，跳过管理员 <b>{bulkPreview.skippedAdmins}</b> 个。
+                  </div>
+                )}
+                <div className="mt-5 grid grid-cols-2 gap-2">
+                  <Button variant="secondary" loading={busy === 'bulk-preview'} onClick={previewBulkExpiry}>预览范围</Button>
+                  <Button variant="claret" loading={busy === 'bulk-apply'} disabled={!bulkPreview} onClick={applyBulkExpiry}>确认补偿</Button>
+                </div>
+              </Panel>
+            </div>
+
+            <Sheet className="rounded-[20px] p-6 sm:p-7">
+              <div className="flex flex-wrap items-center justify-between gap-4">
+                <h3 className="font-display text-xl font-semibold">账号列表</h3>
+                <label className="relative block w-full sm:w-72"><Search className="absolute left-3 top-1/2 -translate-y-1/2 text-[var(--muted-foreground)]" size={16} /><input className="field pl-10" value={accountQuery} onChange={(event) => setAccountQuery(event.target.value)} placeholder="搜索用户名、邮箱或状态" /></label>
+              </div>
+              <div className="mt-5 grid gap-3">
+                {filteredAccounts.map((user) => (
+                  <div key={user.id} className="rounded-[16px] border border-[rgba(231,246,253,.14)] bg-[rgba(255,255,255,.05)] p-4">
+                    <div className="flex flex-wrap items-start justify-between gap-3">
+                      <div>
+                        <div className="flex flex-wrap items-center gap-2"><b>{user.username}</b><StatusPill user={user} /></div>
+                        <p className="mt-1 text-xs leading-5 text-[var(--muted-foreground)]">有效期：{user.expiresAt ? formatShanghaiDateTime(user.expiresAt) : '永久'} · 媒体端：{user.upstreamFound ? (user.upstreamActive ? '启用' : '停用') : '未找到'}</p>
+                      </div>
+                      {user.role === 'user' ? (
+                        <div className="flex flex-wrap gap-2">
+                          <SmallButton onClick={() => void resetAccountPassword(user)}>改密</SmallButton>
+                          <SmallButton onClick={() => void extendAccount(user)}>续期</SmallButton>
+                          <SmallButton onClick={() => void adjustPoints(user)}>积分</SmallButton>
+                          <SmallButton onClick={() => void toggleAccount(user)}><Power size={13} />{user.status === 'disabled' ? '启用' : '停用'}</SmallButton>
+                          <SmallButton danger onClick={() => void deleteAccount(user)}><Trash2 size={13} />删除</SmallButton>
+                        </div>
+                      ) : <span className="text-xs text-[var(--muted-foreground)]">管理员账号受保护</span>}
+                    </div>
+                  </div>
+                ))}
+                {!filteredAccounts.length && <p className="py-8 text-center text-sm text-[var(--muted-foreground)]">没有匹配的账号。</p>}
+              </div>
             </Sheet>
           </div>
         )}
 
-        {/* CODES */}
         {tab === 'codes' && (
-          <Sheet className="rounded-[20px] p-6 sm:p-7">
-            <SectionHeader eyebrow="卡密管理" title="生成邀请码 / 续期码" body="永久卡密可将账号设为长期有效；普通卡密会按照设定天数延长有效期。" />
-            <div className="mt-6 grid gap-4 sm:grid-cols-5">
-              <Select label="卡密类型" value={type} onChange={setType} options={[['register', '注册邀请码'], ['renew', '续期码']]} hint={`当前：${codeTypeLabels[type]}`} />
-              <NumberInput label="有效天数" value={durationDays} min={1} disabled={permanent} onChange={setDurationDays} hint="永久卡密无需天数" />
-              <NumberInput label="生成数量" value={count} min={1} max={100} onChange={setCount} hint="一次生成几张卡密" />
-              <NumberInput label="每张可用次数" value={maxUses} min={1} max={10000} onChange={setMaxUses} hint="支持多人共用同一张卡密" />
-              <CheckPanel label="永久卡密" checked={permanent} onChange={setPermanent} />
-            </div>
-            <Button variant="claret" className="mt-5 w-full sm:w-auto" loading={busy === 'codes'} loadingText="生成中" onClick={createCodes}><KeyRound size={16} /> 生成卡密</Button>
-            <div className="mt-8 flex items-center justify-between gap-3">
-              <h3 className="display-md text-[1.4rem]">卡密列表</h3>
-              <p className="text-sm text-[var(--muted-foreground)]">共 {codes.length} 个，按类型归类</p>
-            </div>
-            <Panel className="mt-4 rounded-[16px] p-3 sm:p-4">
-              <div className={`grid gap-1 rounded-[14px] border border-[rgba(231,246,253,.12)] bg-[rgba(255,255,255,.08)] p-1 ${codeGroups.length === 2 ? 'grid-cols-2' : 'grid-cols-3'}`}>
-                {codeGroups.map((group) => (
-                  <button key={group.type} onClick={() => setActiveCodeType(group.type)} className={`min-w-0 rounded-[11px] px-2 py-2 text-left transition ${activeCodeType === group.type ? 'border border-[rgba(0,190,227,.58)] bg-[rgba(0,190,227,.18)] text-[var(--foreground)] shadow-sm' : 'text-[var(--foreground)] hover:bg-[rgba(255,255,255,.08)]'}`}>
-                    <span className="block truncate font-display text-[13px] font-semibold leading-5 sm:text-base">{group.label}</span>
-                    <span className={`mt-0.5 block truncate text-[10px] leading-4 sm:text-xs ${activeCodeType === group.type ? 'text-[var(--muted-foreground)]' : 'text-[var(--muted-foreground)]'}`}>{group.all.length} 个 · {group.body}</span>
-                  </button>
-                ))}
+          <div className="mt-5 grid gap-5">
+            <Sheet className="rounded-[20px] p-6 sm:p-7">
+              <SectionHeader eyebrow="卡密管理" title="邀请码与续期码" body="卡密统一在 Web 端生成、启停和删除，Telegram Bot 不提供生成命令。" />
+              <div className="mt-6 grid gap-4 sm:grid-cols-2 lg:grid-cols-5">
+                <Select label="类型" value={codeForm.type} onChange={(value) => setCodeForm({ ...codeForm, type: value })} options={[["register", "注册邀请码"], ["renew", "续期码"]]} />
+                <NumberInput label="有效天数" value={codeForm.durationDays} min={0} max={3650} onChange={(value) => setCodeForm({ ...codeForm, durationDays: value })} />
+                <NumberInput label="生成数量" value={codeForm.count} min={1} max={100} onChange={(value) => setCodeForm({ ...codeForm, count: value })} />
+                <NumberInput label="每码使用次数" value={codeForm.maxUses} min={1} max={10000} onChange={(value) => setCodeForm({ ...codeForm, maxUses: value })} />
+                <div className="flex items-end"><Button variant="claret" className="w-full" loading={busy === 'create-codes'} loadingText="生成中" onClick={createCodes}><KeyRound size={15} /> 生成卡密</Button></div>
               </div>
+            </Sheet>
 
-              <div className="mt-4 flex items-center justify-between gap-3 border-b border-[rgba(231,246,253,.12)] pb-3">
-                <div className="min-w-0">
-                  <h4 className="font-display text-lg font-semibold">{activeCodeGroup.label}</h4>
-                  <p className="mt-1 text-xs text-[var(--muted-foreground)]">每页 10 个，点上方分类切换，不刷新页面。</p>
-                </div>
-                <span className="chip shrink-0">{activeCodeGroup.all.length} 个</span>
-              </div>
-
-              <div className="mt-3 grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
-                {activeCodeGroup.visible.map((c) => (
-                  <div key={c.id} className="rounded-[12px] border border-[rgba(231,246,253,.22)] bg-[rgba(255,255,255,.09)] p-3">
-                    <div className="flex items-center justify-between gap-2">
-                      <p className="min-w-0 flex-1 truncate font-mono text-sm font-semibold" title={c.code}>{c.code}</p>
-                      <button title="复制" className="inline-flex min-h-8 shrink-0 items-center gap-1 rounded-lg border border-[rgba(231,246,253,.16)] bg-[rgba(255,255,255,.08)] px-2 text-xs font-semibold text-[var(--foreground)]" onClick={() => copyCode(c.code)}><Copy size={13} /> 复制</button>
-                    </div>
-                    <p className="mt-1 truncate text-xs text-[var(--muted-foreground)]">{c.durationDays === 0 ? '永久' : `${c.durationDays} 天`} · 已用 {c.usedCount}/{c.maxUses} · {c.status === 'disabled' ? '已禁用' : c.usedCount >= c.maxUses ? '已用完' : '可用'}</p>
-                    <div className="mt-3 grid grid-cols-2 gap-2">
-                      <button className="inline-flex min-h-8 items-center justify-center gap-1 rounded-lg border border-[rgba(231,246,253,.16)] bg-[rgba(255,255,255,.08)] px-2 text-xs font-semibold text-[var(--foreground)] disabled:opacity-40" disabled={busy === `code-${c.id}` || (c.status === 'disabled' && c.usedCount >= c.maxUses)} onClick={() => toggleCodeStatus(c)}><Power size={13} />{c.status === 'disabled' ? '启用' : '禁用'}</button>
-                      <button className="inline-flex min-h-8 items-center justify-center gap-1 rounded-lg border border-[rgba(0,190,227,.32)] bg-[rgba(255,255,255,.08)] px-2 text-xs font-semibold text-[var(--primary)] disabled:opacity-40" disabled={busy === `delete-code-${c.id}`} onClick={() => setCodeDeleteTarget(c)}><Trash2 size={13} />删除</button>
+            <Sheet className="rounded-[20px] p-6 sm:p-7">
+              <div className="flex items-center justify-between gap-4"><h3 className="font-display text-xl font-semibold">卡密列表</h3><Button variant="secondary" onClick={async () => setCodes((await api.listCodes()).codes)}><RefreshCcw size={15} /> 刷新</Button></div>
+              <div className="mt-5 grid gap-3">
+                {codes.map((code) => (
+                  <div key={code.id} className="flex flex-wrap items-center justify-between gap-3 rounded-[16px] border border-[rgba(231,246,253,.14)] bg-[rgba(255,255,255,.05)] p-4">
+                    <div className="min-w-0"><p className="break-all font-mono font-semibold">{code.code}</p><p className="mt-1 text-xs text-[var(--muted-foreground)]">{code.type === 'register' ? '注册邀请码' : '续期码'} · {code.durationDays === 0 ? '永久' : `${code.durationDays} 天`} · 已用 {code.usedCount}/{code.maxUses} · {code.status === 'active' ? '启用' : '停用'}</p></div>
+                    <div className="flex flex-wrap gap-2">
+                      <SmallButton onClick={() => void navigator.clipboard.writeText(code.code)}><Copy size={13} />复制</SmallButton>
+                      <SmallButton onClick={() => void toggleCode(code)}>{code.status === 'active' ? '禁用' : '启用'}</SmallButton>
+                      <SmallButton danger onClick={() => void deleteCode(code)}><Trash2 size={13} />删除</SmallButton>
                     </div>
                   </div>
                 ))}
+                {!codes.length && <p className="py-8 text-center text-sm text-[var(--muted-foreground)]">暂无卡密。</p>}
               </div>
-
-              {!activeCodeGroup.all.length && <p className="mt-4 rounded-[12px] border border-dashed border-[rgba(231,246,253,.16)] bg-[rgba(255,255,255,.08)] p-5 text-center text-sm text-[var(--muted-foreground)]">暂无{activeCodeGroup.label}</p>}
-              {activeCodeGroup.totalPages > 1 && (
-                <div className="mt-4 flex items-center justify-between gap-3 border-t border-[rgba(231,246,253,.12)] pt-3">
-                  <button className="btn btn-secondary !min-h-9 !rounded-lg !px-3 !py-1.5 text-xs" disabled={activeCodeGroup.page <= 1} onClick={() => setCodePages({ ...codePages, [activeCodeGroup.type]: activeCodeGroup.page - 1 })}>上一页</button>
-                  <span className="text-xs font-semibold text-[var(--muted-foreground)]">{activeCodeGroup.page} / {activeCodeGroup.totalPages}</span>
-                  <button className="btn btn-secondary !min-h-9 !rounded-lg !px-3 !py-1.5 text-xs" disabled={activeCodeGroup.page >= activeCodeGroup.totalPages} onClick={() => setCodePages({ ...codePages, [activeCodeGroup.type]: activeCodeGroup.page + 1 })}>下一页</button>
-                </div>
-              )}
-            </Panel>
-            {!codes.length && <p className="mt-4 text-[var(--muted-foreground)]">暂无卡密。</p>}
-          </Sheet>
+            </Sheet>
+          </div>
         )}
 
-        {/* ACCOUNTS — real user management, replaces ABS backend */}
-        {tab === 'accounts' && (
-          <div className="grid gap-5">
+        {tab === 'operations' && (
+          <div className="mt-5 grid gap-5">
             <Sheet className="rounded-[20px] p-6 sm:p-7">
-              <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
-                <SectionHeader eyebrow="用户账号" title="账号管理" body="可直接创建账号、重置密码、启用或停用账号，以及调整有效期，无需进入媒体后台。" />
-                <div className="flex flex-wrap gap-2">
-                  <Button variant="secondary" onClick={openBulkExpiryPreview}><CalendarClock size={15} /> 批量补偿有效期</Button>
-                  <Button variant="secondary" onClick={async () => { setBusy('refreshAcc'); await refreshAccounts().finally(() => setBusy('')); }} loading={busy === 'refreshAcc'} loadingText="刷新中"><RefreshCcw size={15} /> 刷新</Button>
-                </div>
-              </div>
-              <div className="mt-5 grid gap-3 sm:grid-cols-4">
-                <DarkStatLight label="账号总数" value={`${accountStats.total}`} />
-                <DarkStatLight label="启用中" value={`${accountStats.active}`} />
-                <DarkStatLight label="已停用" value={`${accountStats.disabled}`} />
-                <DarkStatLight label="已到期" value={`${accountStats.expired}`} />
-              </div>
-              {!upstreamAvailable && <div className="mt-4"><StatusNote tone="warning"><AlertTriangle size={16} className="mr-1 inline" /> 暂时无法连接媒体服务器，启用状态可能不是最新；改密/启停操作会失败，请稍后重试。</StatusNote></div>}
-
-              <Panel className="mt-6 rounded-[16px] p-5">
-                <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-                  <div>
-                    <div className="flex items-center gap-2 font-display font-semibold"><CalendarClock size={18} /> 批量有效期补偿</div>
-                    <p className="mt-1 text-xs leading-5 text-[rgba(166,191,202,.72)]">用于服务器波动等场景：一键给所有普通用户增加有效期，管理员账号会自动跳过。</p>
-                  </div>
-                  <Button variant="claret" onClick={openBulkExpiryPreview}><CalendarClock size={15} /> 给所有用户 +{bulkExtendDays || 7} 天</Button>
-                </div>
-              </Panel>
-
-              <Panel className="mt-6 rounded-[16px] p-5">
-                <div className="flex items-center gap-2 font-display font-semibold"><UserPlus size={18} /> 新建账号</div>
-                <div className="mt-4 grid gap-3 sm:grid-cols-[1.2fr_1.2fr_.8fr_auto] sm:items-end">
-                  <Field label="用户名"><input className="field" placeholder="英文/数字/_.-" value={newUser.username} onChange={(e) => setNewUser({ ...newUser, username: e.target.value })} /></Field>
-                  <Field label="初始密码"><input className="field" type="password" placeholder="至少符合密码长度" value={newUser.password} onChange={(e) => setNewUser({ ...newUser, password: e.target.value })} /></Field>
-                  <Field label="有效天数"><input className="field" type="number" min={0} value={newUser.durationDays} onChange={(e) => setNewUser({ ...newUser, durationDays: Math.max(0, Number(e.target.value) || 0) })} /></Field>
-                  <Button variant="claret" loading={busy === 'createUser'} loadingText="创建中" onClick={createAccount}><UserPlus size={15} /> 创建</Button>
-                </div>
-                <p className="mt-2 text-xs text-[rgba(166,191,202,.72)]">有效天数填 0 表示长期有效。账号会同步在媒体服务器创建。</p>
-              </Panel>
-
-              <label className="relative mt-6 block">
-                <Search className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-[var(--muted-foreground)]" size={16} />
-                <input className="field !pl-10" placeholder="搜索用户名 / 状态 / 邮箱" value={accountQuery} onChange={(e) => setAccountQuery(e.target.value)} />
-              </label>
-
-              <div className="admin-scroll-list mt-4 grid gap-3">
-                {filteredAccounts.map((u) => (
-                  <Panel key={u.id} className="rounded-[16px] p-4">
-                    <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
-                      <div className="min-w-0">
-                        <div className="flex flex-wrap items-center gap-2">
-                          <p className="font-display font-semibold">{u.username}</p>
-                          <StatusBadge status={u.status} isExpired={u.isExpired} />
-                          {u.upstreamFound === false && <span className="rounded-full bg-[rgba(0,190,227,.12)] px-2 py-0.5 text-[11px] font-semibold text-[var(--primary)]">媒体端缺失</span>}
-                        </div>
-                        <p className="mt-1 text-xs text-[var(--muted-foreground)]">{u.email || '无邮箱'} · 有效期：{u.expiresAt ? new Date(u.expiresAt).toLocaleString('zh-CN') : '长期'} · 创建：{u.createdAt ? new Date(u.createdAt).toLocaleDateString('zh-CN') : '-'}</p>
-                      </div>
-                    </div>
-                    <div className="mt-3 flex flex-wrap gap-2">
-                      <MiniBtn onClick={() => { setPwTarget(u); setPwValue(''); }}><Lock size={13} /> 改密</MiniBtn>
-                      <MiniBtn onClick={() => setExpiryTarget(u)}><CalendarClock size={13} /> 有效期</MiniBtn>
-                      {u.status === 'disabled'
-                        ? <MiniBtn onClick={() => setConfirm({ kind: 'enable', user: u })}><Power size={13} /> 启用</MiniBtn>
-                        : <MiniBtn onClick={() => setConfirm({ kind: 'disable', user: u })}><Power size={13} /> 停用</MiniBtn>}
-                      <MiniBtn danger onClick={() => setConfirm({ kind: 'delete', user: u })}><Trash2 size={13} /> 删除</MiniBtn>
-                    </div>
+              <div className="flex flex-wrap items-start justify-between gap-4"><SectionHeader eyebrow="工单管理" title="求书 / 播客请求" body="受理、完成或拒绝用户请求；状态会同步到 Web，并通知已绑定 Telegram 的用户。" /><div className="flex gap-2"><select className="field !min-h-10 !w-auto" value={requestFilter} onChange={(event) => setRequestFilter(event.target.value)}><option value="open">待处理</option><option value="pending">新提交</option><option value="accepted">已受理</option><option value="available">已上架</option><option value="rejected">未采纳</option><option value="all">全部</option></select><Button variant="secondary" onClick={refreshOperations}><RefreshCcw size={15} /> 刷新全部</Button></div></div>
+              <div className="mt-6 grid gap-3">
+                {filteredRequests.map((item) => (
+                  <Panel key={item.id} className="rounded-[16px] p-4">
+                    <div className="flex flex-wrap items-start justify-between gap-3"><div><p className="font-display text-lg font-semibold">{item.title}</p><p className="mt-1 text-xs text-[var(--muted-foreground)]">{item.username || '未知用户'} · {item.kind === 'book' ? '有声书' : '播客'} · {formatShanghaiDateTime(item.createdAt)}</p></div><span className="rounded-full tag-gold px-3 py-1 text-xs font-semibold">{requestStatusText[item.status] || item.status}</span></div>
+                    {item.details && <p className="mt-3 text-sm leading-6 text-[var(--muted-foreground)]">{item.details}</p>}
+                    <div className="mt-4 flex flex-wrap gap-2"><SmallButton onClick={() => void updateMediaRequest(item, 'accepted')}>受理</SmallButton><SmallButton onClick={() => void updateMediaRequest(item, 'available')}>已上架</SmallButton><SmallButton danger onClick={() => void updateMediaRequest(item, 'rejected')}>拒绝</SmallButton></div>
                   </Panel>
                 ))}
-                {!filteredAccounts.length && <p className="text-[var(--muted-foreground)]">没有匹配的账号。</p>}
+                {!filteredRequests.length && <p className="py-7 text-center text-sm text-[var(--muted-foreground)]">当前筛选下暂无内容请求。</p>}
               </div>
+            </Sheet>
+
+            <Sheet className="rounded-[20px] p-6 sm:p-7">
+              <SectionHeader eyebrow="消息触达" title="Telegram 通知广播" body="先预览接收人数，再确认加入可靠通知队列；失败消息可在下方重试，所有广播均写入审计记录。" />
+              <div className="mt-6 grid gap-4 lg:grid-cols-[.35fr_1fr]">
+                <Select label="接收范围" value={broadcastAudience} onChange={(value) => { setBroadcastAudience(value as BroadcastAudience); setBroadcastPreview(null); }} options={[["active", "正常账号"], ["expiring_7d", "7 天内到期"], ["expired", "已到期账号"], ["all_bound", "全部已绑定账号"]]} />
+                <Textarea label="广播内容" compact value={broadcastMessage} onChange={(value) => { setBroadcastMessage(value); setBroadcastPreview(null); }} />
+              </div>
+              {broadcastPreview && <div className="mt-4"><StatusNote tone={broadcastPreview.count ? 'warning' : 'neutral'}>接收人数：{broadcastPreview.count}；抽样账号：{broadcastPreview.sample.join('、') || '无'}。消息尚未发送。</StatusNote></div>}
+              <div className="mt-5 grid gap-2 sm:grid-cols-2"><Button variant="secondary" loading={busy === 'broadcast-preview'} onClick={previewBroadcast}>预览接收人</Button><Button variant="claret" loading={busy === 'broadcast-send'} disabled={!broadcastPreview?.count} onClick={sendBroadcast}>确认加入发送队列</Button></div>
+            </Sheet>
+
+            <div className="grid gap-5 lg:grid-cols-2">
+              <Sheet className="rounded-[20px] p-6 sm:p-7">
+                <div className="flex items-center justify-between gap-3"><h3 className="font-display text-xl font-semibold"><Bell className="mr-2 inline" size={19} />通知队列</h3><select className="field !min-h-10 !w-auto" value={notificationFilter} onChange={(event) => setNotificationFilter(event.target.value)}><option value="problem">待发 / 异常</option><option value="failed">失败</option><option value="retry">重试中</option><option value="pending">待发送</option><option value="sent">已发送</option><option value="all">全部</option></select></div>
+                <div className="mt-5 grid gap-3">
+                  {filteredNotifications.slice(0, 30).map((item) => (
+                    <Panel key={item.id} className="rounded-[14px] p-4"><div className="flex items-start justify-between gap-3"><div className="min-w-0"><p className="truncate font-semibold">{item.kind}</p><p className="mt-1 line-clamp-2 text-xs text-[var(--muted-foreground)]">{item.message}</p></div><span className="text-xs">{item.status}</span></div>{item.lastError && <p className="mt-2 text-xs text-red-300">{item.lastError}</p>}{item.status !== 'sent' && <div className="mt-3"><SmallButton onClick={() => void retryNotification(item)}>重新发送</SmallButton></div>}</Panel>
+                  ))}
+                  {!filteredNotifications.length && <p className="py-7 text-center text-sm text-[var(--muted-foreground)]">当前筛选下暂无通知记录。</p>}
+                </div>
+              </Sheet>
+
+              <Sheet className="rounded-[20px] p-6 sm:p-7">
+                <h3 className="font-display text-xl font-semibold">群组资格</h3>
+                <div className="mt-5 grid gap-3">
+                  {memberships.map((item) => <Panel key={item.id} className="rounded-[14px] p-4"><div className="flex items-center justify-between gap-3"><p className="font-semibold">{item.username}</p><span className="text-xs">{membershipStatusText[item.status] || item.status}</span></div><p className="mt-2 text-xs text-[var(--muted-foreground)]">TG {item.telegramId} · 检查于 {formatShanghaiDateTime(item.lastCheckedAt)}</p>{item.graceExpiresAt && <p className="mt-1 text-xs text-amber-200">宽限至 {formatShanghaiDateTime(item.graceExpiresAt)}</p>}</Panel>)}
+                  {!memberships.length && <p className="py-7 text-center text-sm text-[var(--muted-foreground)]">暂无群组资格记录。</p>}
+                </div>
+              </Sheet>
+            </div>
+
+            <Sheet className="rounded-[20px] p-6 sm:p-7">
+              <h3 className="font-display text-xl font-semibold">最近审计记录</h3>
+              <div className="mt-5 overflow-x-auto"><table className="w-full min-w-[680px] text-left text-sm"><thead className="text-[var(--muted-foreground)]"><tr><th className="pb-3">时间</th><th className="pb-3">操作者</th><th className="pb-3">动作</th><th className="pb-3">对象</th></tr></thead><tbody>{audit.map((item) => <tr key={item.id} className="border-t border-white/10"><td className="py-3">{formatShanghaiDateTime(item.createdAt)}</td><td className="py-3">{item.actor || 'system'}</td><td className="py-3 font-mono text-xs">{item.action}</td><td className="py-3 text-xs">{item.targetType || '-'} {item.targetId || ''}</td></tr>)}</tbody></table></div>
             </Sheet>
           </div>
         )}
 
-
-        {/* USERS */}
-        {tab === 'users' && (
-          <Sheet className="rounded-[20px] p-6 sm:p-7">
-            <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
-              <SectionHeader eyebrow="用户状态" title="用户与活跃度" body="结合账号状态、最近收听记录和巡检策略，快速找到需要关注的用户。" />
-              <Button variant="secondary" onClick={async () => { setBusy('refresh'); await refreshOverview().finally(() => setBusy('')); }} loading={busy === 'refresh'} loadingText="刷新中"><RefreshCcw size={15} /> 刷新</Button>
-            </div>
-            <div className="mt-5 grid gap-3 lg:grid-cols-[1fr_auto]">
-              <label className="relative">
-                <Search className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-[var(--muted-foreground)]" size={16} />
-                <input className="field !pl-10" placeholder="搜索用户名、状态或判断原因" value={userQuery} onChange={(e) => setUserQuery(e.target.value)} />
-              </label>
-              <span className="chip"><Eye size={14} /> 当前显示 {filteredUsers.length} 个</span>
-            </div>
-            <div className="mt-5"><StatusNote tone="warning"><AlertTriangle size={16} className="mr-1 inline" /> 新用户默认 {settings.operations.newUserGraceDays} 天宽限期；超过宽限且 {settings.operations.inactiveDays} 天无记录时进入待关注。</StatusNote></div>
-            {riskyUsers.length > 0 && <div className="mt-4"><StatusNote tone="danger">当前有 {riskyUsers.length} 个用户被策略标记为待关注。</StatusNote></div>}
-            <div className="admin-scroll-list mt-5 grid gap-3">
-              {filteredUsers.map((user) => (
-                <Panel key={user.id} className="rounded-[16px] p-4">
-                  <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
-                    <div>
-                      <p className="font-display font-semibold">{user.username}</p>
-                      <p className="mt-1 text-xs text-[var(--muted-foreground)]">门户状态：{user.portalStatus ? statusLabels[user.portalStatus] || user.portalStatus : '未绑定'} · 启用：{user.isActive ? '是' : '否'} · 记录 {user.progressCount} 条</p>
-                    </div>
-                    <span className={`w-fit rounded-full px-3 py-1 text-xs font-semibold ${user.inactivityCandidate ? 'tag-claret' : 'tag-sage'}`}>{user.inactivityCandidate ? '待关注' : '正常'}</span>
-                  </div>
-                  <div className="mt-3 grid gap-2 text-xs text-[var(--muted-foreground)] sm:grid-cols-3">
-                    <p>最近登录：{user.lastSeen ? new Date(user.lastSeen).toLocaleString('zh-CN') : '未知'}</p>
-                    <p>最近收听：{user.latestListenAt ? new Date(user.latestListenAt).toLocaleString('zh-CN') : '暂无'}</p>
-                    <p>判断：{user.inactivityReason || '-'}</p>
-                  </div>
-                </Panel>
-              ))}
-            </div>
-          </Sheet>
+        {tab === 'library' && (
+          <div className="mt-5 grid gap-5">
+            <Sheet className="rounded-[20px] p-6 sm:p-7">
+              <div className="flex flex-wrap items-start justify-between gap-4"><SectionHeader eyebrow="媒体库" title="ABS 实时概览" body="查看媒体库、上游账号收听进度和不活跃候选。" /><Button variant="secondary" onClick={async () => setLibrary(await api.adminLibraryOverview())}><RefreshCcw size={15} /> 刷新</Button></div>
+              <div className="mt-6 grid grid-cols-2 gap-3 lg:grid-cols-4"><StatCard label="媒体库" value={library?.stats.libraryCount ?? 0} /><StatCard label="上游账号" value={library?.stats.upstreamUserCount ?? 0} /><StatCard label="进度记录" value={library?.stats.progressCount ?? 0} /><StatCard label="不活跃候选" value={library?.stats.inactiveCandidateCount ?? 0} /></div>
+              <div className="mt-6 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">{library?.libraries.map((item) => <Panel key={item.id} className="rounded-[14px] p-4"><p className="font-display font-semibold">{item.name}</p><p className="mt-1 text-xs text-[var(--muted-foreground)]">{item.mediaType} · 扫描：{item.lastScan ? formatShanghaiDateTime(item.lastScan) : '未知'}</p></Panel>)}</div>
+            </Sheet>
+            <Sheet className="rounded-[20px] p-6 sm:p-7">
+              <div className="flex items-center justify-between gap-3"><h3 className="font-display text-xl font-semibold">账号收听活动</h3><Button variant="secondary" loading={busy === 'inactivity-preview'} onClick={previewInactivity}>停用预览</Button></div>
+              {inactivityPreview && <div className="mt-4"><StatusNote tone={inactivityPreview.candidates.length ? 'warning' : 'success'}>检查 {inactivityPreview.checked} 个账号，候选 {inactivityPreview.candidates.length} 个。本次操作仅预览。</StatusNote></div>}
+              <div className="mt-5 grid gap-3">{library?.users.map((item) => <Panel key={item.id} className="flex flex-wrap items-center justify-between gap-3 rounded-[14px] p-4"><div><div className="flex items-center gap-2"><p className="font-semibold">{item.username}</p>{item.inactivityCandidate && <span className="rounded-full tag-claret px-2 py-0.5 text-[10px]">候选停用</span>}</div><p className="mt-1 text-xs text-[var(--muted-foreground)]">最近收听：{item.latestListenAt ? formatShanghaiDateTime(item.latestListenAt) : '无记录'} · 进度 {item.progressCount} 条</p></div><span className="text-xs">{item.isActive ? '上游启用' : '上游停用'} / {item.portalStatus || '未绑定'}</span></Panel>)}</div>
+            </Sheet>
+          </div>
         )}
 
-        {/* SETTINGS */}
-        {tab === 'settings' && (
+        {tab === 'settings' && <div className="mt-5 grid gap-5">
           <Sheet className="rounded-[20px] p-6 sm:p-7">
-            <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
-              <SectionHeader eyebrow="系统设置" title="配置" body="修改前台内容、客户端下载和运营规则。" />
-              <Button variant="claret" loading={busy === 'settings'} loadingText="保存中" disabled={!settingsReady} onClick={saveSettings}><Save size={16} /> 保存设置</Button>
-            </div>
-            <div className="mt-6 grid gap-5">
+            <SectionHeader eyebrow="站点配置" title="页面内容与入口" body="维护公开页面、客户端连接信息和展示开关。" />
+            <div className="mt-6 grid gap-5 lg:grid-cols-2">
               <Panel className="rounded-[16px] p-5">
-                <h3 className="font-display text-lg font-semibold">前台展示</h3>
-                <div className="mt-4 grid gap-4 lg:grid-cols-2">
-                  <Text label="品牌名称" value={settings.siteName} onChange={(v) => setSettings({ ...settings, siteName: v })} />
-                  <Text label="页头短句" value={settings.tagline} onChange={(v) => setSettings({ ...settings, tagline: v })} />
-                  <Text label="首页标签" value={settings.copy.heroKicker} onChange={(v) => setSettings({ ...settings, copy: { ...settings.copy, heroKicker: v } })} />
-                  <Text label="主按钮" value={settings.copy.primaryCta} onChange={(v) => setSettings({ ...settings, copy: { ...settings.copy, primaryCta: v } })} />
-                  <Textarea compact label="首页主标题" value={settings.copy.heroTitle} onChange={(v) => setSettings({ ...settings, copy: { ...settings.copy, heroTitle: v } })} />
-                  <Textarea compact label="首页副标题" value={settings.copy.heroSubtitle} onChange={(v) => setSettings({ ...settings, copy: { ...settings.copy, heroSubtitle: v } })} />
-                  <Textarea compact label="首页简介" value={settings.copy.notice} onChange={(v) => setSettings({ ...settings, copy: { ...settings.copy, notice: v } })} />
-                  <UrlField label="客服链接" value={settings.links.supportUrl} onChange={(v) => setSettings({ ...settings, links: { ...settings.links, supportUrl: v } })} optional />
+                <h3 className="font-display text-lg font-semibold">品牌与首页</h3>
+                <div className="mt-4 grid gap-4 sm:grid-cols-2">
+                  <Text label="站点名称" value={settings.siteName} onChange={(value) => setSettings({ ...settings, siteName: value })} />
+                  <Text label="站点副标题" value={settings.tagline} onChange={(value) => setSettings({ ...settings, tagline: value })} />
+                  <Text label="首页眉题" value={settings.copy.heroKicker} onChange={(value) => setSettings({ ...settings, copy: { ...settings.copy, heroKicker: value } })} />
+                  <Text label="首页主标题" value={settings.copy.heroTitle} onChange={(value) => setSettings({ ...settings, copy: { ...settings.copy, heroTitle: value } })} />
+                  <Text label="首页副标题" value={settings.copy.heroSubtitle} onChange={(value) => setSettings({ ...settings, copy: { ...settings.copy, heroSubtitle: value } })} />
+                </div>
+                <div className="mt-4"><Textarea label="首页说明" compact value={settings.copy.notice} onChange={(value) => setSettings({ ...settings, copy: { ...settings.copy, notice: value } })} /></div>
+              </Panel>
+
+              <Panel className="rounded-[16px] p-5">
+                <h3 className="font-display text-lg font-semibold">客户端与链接</h3>
+                <div className="mt-4 grid gap-4 sm:grid-cols-2">
+                  <UrlField label="听书服务器地址" value={settings.client.serverUrl} onChange={(value) => setSettings({ ...settings, client: { ...settings.client, serverUrl: value } })} />
+                  <UrlField label="Android 安装包" optional value={settings.client.androidDownloadUrl} onChange={(value) => setSettings({ ...settings, client: { ...settings.client, androidDownloadUrl: value } })} />
+                  <UrlField label="客服链接" optional value={settings.links.supportUrl} onChange={(value) => setSettings({ ...settings, links: { ...settings.links, supportUrl: value } })} />
+                  <UrlField label="公告入口" optional value={settings.links.announcementUrl} onChange={(value) => setSettings({ ...settings, links: { ...settings.links, announcementUrl: value } })} />
+                </div>
+                <div className="mt-4 grid gap-4 sm:grid-cols-2">
+                  <Textarea label="iPhone / iPad 说明" compact value={settings.client.iosGuideText} onChange={(value) => setSettings({ ...settings, client: { ...settings.client, iosGuideText: value } })} />
+                  <Textarea label="电脑端说明" compact value={settings.client.desktopGuideText} onChange={(value) => setSettings({ ...settings, client: { ...settings.client, desktopGuideText: value } })} />
                 </div>
               </Panel>
 
               <Panel className="rounded-[16px] p-5">
-                <h3 className="font-display text-lg font-semibold">客户端与下载</h3>
-                <div className="mt-4 grid gap-4 lg:grid-cols-2">
-                  <UrlField label="听书服务器地址" value={settings.client.serverUrl} onChange={(v) => setSettings({ ...settings, client: { ...settings.client, serverUrl: v } })} />
-                  <UrlField label="Android 安装包" value={settings.client.androidDownloadUrl} onChange={(v) => setSettings({ ...settings, client: { ...settings.client, androidDownloadUrl: v } })} optional />
-                  <Textarea compact label="iPhone / iPad 安装说明" value={settings.client.iosGuideText} onChange={(v) => setSettings({ ...settings, client: { ...settings.client, iosGuideText: v } })} />
-                  <Textarea compact label="电脑端使用说明" value={settings.client.desktopGuideText} onChange={(v) => setSettings({ ...settings, client: { ...settings.client, desktopGuideText: v } })} />
+                <h3 className="font-display text-lg font-semibold">公开页面开关</h3>
+                <div className="mt-3">
+                  <Check label="开放网站自助注册" checked={settings.features.registration} onChange={(value) => setSettings({ ...settings, features: { ...settings.features, registration: value } })} />
+                  <Check label="显示客服入口" checked={settings.features.showSupportEntry} onChange={(value) => setSettings({ ...settings, features: { ...settings.features, showSupportEntry: value } })} />
+                  <Check label="显示公告入口" checked={settings.features.showAnnouncements} onChange={(value) => setSettings({ ...settings, features: { ...settings.features, showAnnouncements: value } })} />
                 </div>
               </Panel>
 
               <Panel className="rounded-[16px] p-5">
-                <h3 className="font-display text-lg font-semibold">页面内容</h3>
-                <div className="mt-4 grid gap-4 lg:grid-cols-2">
+                <h3 className="font-display text-lg font-semibold">教程内容</h3>
+                <div className="mt-4 grid gap-4 sm:grid-cols-2">
                   <Textarea label="开始步骤（每行一条）" value={stepsText} onChange={setStepsText} />
                   <Textarea label="常见问题（问题|答案）" value={faqText} onChange={setFaqText} />
                 </div>
               </Panel>
 
-              <Panel className="rounded-[16px] p-5">
-                <p className="mb-3 text-sm font-semibold text-[var(--muted-foreground)]">功能开关</p>
-                <Check label="开放注册" checked={settings.features.registration} onChange={(v) => setSettings({ ...settings, features: { ...settings.features, registration: v } })} />
-                <Check label="显示客服入口" checked={settings.features.showSupportEntry} onChange={(v) => setSettings({ ...settings, features: { ...settings.features, showSupportEntry: v } })} />
-                <Check label="显示公告入口" checked={settings.features.showAnnouncements} onChange={(v) => setSettings({ ...settings, features: { ...settings.features, showAnnouncements: v } })} />
-              </Panel>
               <Panel className="rounded-[16px] p-5 lg:col-span-2">
-                <h3 className="font-display text-lg font-semibold">公告</h3>
-                <div className="grid gap-4 lg:grid-cols-2">
-                  <Text label="标题" value={settings.announcement?.title || ''} onChange={(v) => setSettings({ ...settings, announcement: { ...settings.announcement, title: v } })} />
-                  <Text label="按钮文字" value={settings.announcement?.linkLabel || ''} onChange={(v) => setSettings({ ...settings, announcement: { ...settings.announcement, linkLabel: v } })} />
-                  <Textarea compact label="正文" value={settings.announcement?.body || ''} onChange={(v) => setSettings({ ...settings, announcement: { ...settings.announcement, body: v } })} />
-                  <UrlField label="跳转链接" value={settings.announcement?.linkUrl || ''} onChange={(v) => setSettings({ ...settings, announcement: { ...settings.announcement, linkUrl: v } })} optional />
+                <h3 className="font-display text-lg font-semibold">不活跃账号自动治理</h3>
+                <p className="mt-1 text-xs leading-5 text-[var(--muted-foreground)]">后台任务会按收听活动判断普通账号；管理员、永久账号、新注册宽限期账号不会被误停。建议先在“媒体库”页预览候选。</p>
+                <div className="mt-3"><Check label="自动停用长期无收听活动的账号" checked={settings.operations.inactivityAutoDisable} onChange={(value) => setSettings({ ...settings, operations: { ...settings.operations, inactivityAutoDisable: value } })} /></div>
+                <div className="mt-4 grid gap-4 sm:grid-cols-2">
+                  <NumberInput label="不活跃阈值（天）" value={settings.operations.inactiveDays} min={7} max={3650} onChange={(value) => setSettings({ ...settings, operations: { ...settings.operations, inactiveDays: value } })} />
+                  <NumberInput label="新账号宽限（天）" value={settings.operations.newUserGraceDays} min={0} max={365} onChange={(value) => setSettings({ ...settings, operations: { ...settings.operations, newUserGraceDays: value } })} />
                 </div>
-                <div className="mt-4">
-                  <Textarea label="时间线（时间|内容）" value={timelineText} onChange={setTimelineText} />
-                </div>
-              </Panel>
-              <Panel className="rounded-[16px] p-5">
-                <h3 className="font-display text-lg font-semibold">运营设置</h3>
-                <Check label="开启自动巡检" checked={settings.operations.inactivityAutoDisable} onChange={(v) => setSettings({ ...settings, operations: { ...settings.operations, inactivityAutoDisable: v } })} />
-                <NumberInput label="无记录天数" value={settings.operations.inactiveDays} min={1} onChange={(v) => setSettings({ ...settings, operations: { ...settings.operations, inactiveDays: v } })} />
-                <NumberInput label="新用户宽限期" value={settings.operations.newUserGraceDays} min={0} onChange={(v) => setSettings({ ...settings, operations: { ...settings.operations, newUserGraceDays: v } })} />
-                <Button variant="secondary" className="mt-4 w-full" loading={busy === 'inactivity'} loadingText="巡检中" onClick={runInactivityCheck}><ShieldCheck size={16} /> 立即巡检</Button>
+                <p className="mt-4 text-xs text-[var(--muted-foreground)]">上次检查：{settings.operations.lastInactivityCheckAt ? formatShanghaiDateTime(settings.operations.lastInactivityCheckAt) : '尚未运行'} · 上次停用 {settings.operations.lastInactivityDisabled} 个</p>
               </Panel>
             </div>
           </Sheet>
-        )}
+
+          <Sheet className="rounded-[20px] p-6 sm:p-7">
+            <SectionHeader eyebrow="Telegram" title="Bot 功能开关" body="Bot 负责移动端状态操作与工单；这里控制功能是否开放及必要规则。" />
+            <div className="mt-6 grid gap-5 lg:grid-cols-2">
+              <Panel className="rounded-[16px] p-5">
+                <h3 className="font-display text-lg font-semibold">账号与消息</h3>
+                <div className="mt-3">
+                  <Check label="开放账号续期" checked={telegram.renewalEnabled} onChange={(value) => setSettings({ ...settings, telegram: { ...telegram, renewalEnabled: value } })} />
+                  <Check label="开放一次性密码重置" checked={telegram.passwordResetEnabled} onChange={(value) => setSettings({ ...settings, telegram: { ...telegram, passwordResetEnabled: value } })} />
+                  <Check label="显示最近收听" checked={telegram.recentListeningEnabled} onChange={(value) => setSettings({ ...settings, telegram: { ...telegram, recentListeningEnabled: value } })} />
+                  <Check label="显示公告入口" checked={telegram.announcementsEnabled} onChange={(value) => setSettings({ ...settings, telegram: { ...telegram, announcementsEnabled: value } })} />
+                  <Check label="发送账号到期提醒" checked={telegram.lifecycleNotificationsEnabled} onChange={(value) => setSettings({ ...settings, telegram: { ...telegram, lifecycleNotificationsEnabled: value } })} />
+                </div>
+                <div className="mt-4"><Text label="到期提醒天数（逗号分隔）" value={expiryReminderDaysText} onChange={setExpiryReminderDaysText} /></div>
+              </Panel>
+
+              <Panel className="rounded-[16px] p-5">
+                <h3 className="font-display text-lg font-semibold">管理与社群</h3>
+                <p className="mt-1 text-xs leading-5 text-[var(--muted-foreground)]">管理员 ID 仍需通过服务器环境变量 TELEGRAM_ADMIN_IDS 授权。</p>
+                <div className="mt-3">
+                  <Check label="开放 Bot 管理台" checked={telegram.adminEnabled} onChange={(value) => setSettings({ ...settings, telegram: { ...telegram, adminEnabled: value } })} />
+                  <Check label="启用必需群组资格同步" checked={telegram.groupMembershipEnabled} onChange={(value) => setSettings({ ...settings, telegram: { ...telegram, groupMembershipEnabled: value } })} />
+                  <Check label="开放求书 / 播客工单" checked={telegram.requestsEnabled} onChange={(value) => setSettings({ ...settings, telegram: { ...telegram, requestsEnabled: value } })} />
+                </div>
+                <div className="mt-4 grid gap-4 sm:grid-cols-2">
+                  <Text label="必需群组 ID" value={telegram.requiredGroupId} onChange={(value) => setSettings({ ...settings, telegram: { ...telegram, requiredGroupId: value } })} />
+                  <UrlField label="群组邀请链接" optional value={telegram.requiredGroupInviteUrl} onChange={(value) => setSettings({ ...settings, telegram: { ...telegram, requiredGroupInviteUrl: value } })} />
+                  <NumberInput label="退群宽限小时" value={telegram.groupGraceHours} min={1} max={720} onChange={(value) => setSettings({ ...settings, telegram: { ...telegram, groupGraceHours: value } })} />
+                </div>
+              </Panel>
+
+              <Panel className="rounded-[16px] p-5 lg:col-span-2">
+                <h3 className="font-display text-lg font-semibold">签到、积分与邀请</h3>
+                <div className="mt-4 grid gap-5 lg:grid-cols-[.8fr_1.2fr]">
+                  <div>
+                    <Check label="开放每日签到" checked={telegram.checkinEnabled} onChange={(value) => setSettings({ ...settings, telegram: { ...telegram, checkinEnabled: value } })} />
+                    <Check label="开放积分兑换有效期" checked={telegram.pointsRedemptionEnabled} onChange={(value) => setSettings({ ...settings, telegram: { ...telegram, pointsRedemptionEnabled: value } })} />
+                    <Check label="开放好友邀请奖励" checked={telegram.referralEnabled} onChange={(value) => setSettings({ ...settings, telegram: { ...telegram, referralEnabled: value } })} />
+                    <Check label="开放匿名自愿排行榜" checked={telegram.leaderboardEnabled} onChange={(value) => setSettings({ ...settings, telegram: { ...telegram, leaderboardEnabled: value } })} />
+                  </div>
+                  <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+                    <NumberInput label="每日基础积分" value={telegram.checkinBasePoints} min={1} max={10000} onChange={(value) => setSettings({ ...settings, telegram: { ...telegram, checkinBasePoints: value } })} />
+                    <NumberInput label="连续奖励周期" value={telegram.checkinStreakBonusEvery} min={1} max={365} onChange={(value) => setSettings({ ...settings, telegram: { ...telegram, checkinStreakBonusEvery: value } })} />
+                    <NumberInput label="周期额外积分" value={telegram.checkinStreakBonusPoints} min={0} max={10000} onChange={(value) => setSettings({ ...settings, telegram: { ...telegram, checkinStreakBonusPoints: value } })} />
+                    <NumberInput label="兑换一天积分" value={telegram.pointsPerDay} min={1} max={1000000} onChange={(value) => setSettings({ ...settings, telegram: { ...telegram, pointsPerDay: value } })} />
+                    <NumberInput label="单次最多兑换天数" value={telegram.maxRedeemDays} min={1} max={365} onChange={(value) => setSettings({ ...settings, telegram: { ...telegram, maxRedeemDays: value } })} />
+                    <NumberInput label="邀请成功奖励" value={telegram.referralRewardPoints} min={0} max={1000000} onChange={(value) => setSettings({ ...settings, telegram: { ...telegram, referralRewardPoints: value } })} />
+                    <NumberInput label="邀请有效天数" value={telegram.referralInviteValidDays} min={1} max={365} onChange={(value) => setSettings({ ...settings, telegram: { ...telegram, referralInviteValidDays: value } })} />
+                    <NumberInput label="受邀账号天数" value={telegram.referralAccountDays} min={1} max={3650} onChange={(value) => setSettings({ ...settings, telegram: { ...telegram, referralAccountDays: value } })} />
+                    <NumberInput label="每月邀请上限" value={telegram.referralMonthlyLimit} min={1} max={100} onChange={(value) => setSettings({ ...settings, telegram: { ...telegram, referralMonthlyLimit: value } })} />
+                    <NumberInput label="排行榜人数" value={telegram.leaderboardLimit} min={3} max={50} onChange={(value) => setSettings({ ...settings, telegram: { ...telegram, leaderboardLimit: value } })} />
+                  </div>
+                </div>
+              </Panel>
+            </div>
+          </Sheet>
+
+          <Sheet className="rounded-[20px] p-6 sm:p-7">
+            <SectionHeader eyebrow="公告" title="站点公告" body="控制首页和 Bot 公告中展示的内容。" />
+            <div className="mt-6 grid gap-4 lg:grid-cols-2">
+              <Text label="标题" value={settings.announcement.title} onChange={(value) => setSettings({ ...settings, announcement: { ...settings.announcement, title: value } })} />
+              <Text label="按钮文字" value={settings.announcement.linkLabel} onChange={(value) => setSettings({ ...settings, announcement: { ...settings.announcement, linkLabel: value } })} />
+              <Textarea label="正文" compact value={settings.announcement.body} onChange={(value) => setSettings({ ...settings, announcement: { ...settings.announcement, body: value } })} />
+              <UrlField label="跳转链接" optional value={settings.announcement.linkUrl} onChange={(value) => setSettings({ ...settings, announcement: { ...settings.announcement, linkUrl: value } })} />
+            </div>
+            <div className="mt-4"><Textarea label="时间线（时间|内容）" value={timelineText} onChange={setTimelineText} /></div>
+          </Sheet>
+
+          <Button variant="claret" className="w-full" loading={busy === 'save'} loadingText="保存中" disabled={!ready} onClick={saveSettings}>
+            <Save size={16} /> 保存全部设置
+          </Button>
+        </div>}
       </div>
-      <AdminFloatingNav tab={tab} setTab={setTab} />
-
-      {/* bulk expiry modal */}
-      {bulkExpiryOpen && (
-        <Modal
-          title="批量补偿有效期"
-          onClose={() => setBulkExpiryOpen(false)}
-          footer={(
-            <div className="flex gap-3">
-              <Button variant="secondary" className="flex-1" onClick={() => setBulkExpiryOpen(false)}>取消</Button>
-              <Button variant="claret" className="flex-1" loading={busy === 'bulkExpiry'} loadingText="处理中" onClick={submitBulkExpiry}>
-                确认给 {bulkPreview?.affected ?? 0} 人 +{bulkExtendDays || 7} 天
-              </Button>
-            </div>
-          )}
-        >
-          <p className="text-sm leading-6 text-[var(--muted-foreground)]">将为普通用户增加有效期；管理员与长期有效账号不会被修改。适合服务器波动、维护补偿等场景。</p>
-          <div className="mt-4 grid gap-4">
-            <div>
-              <NumberInput label="增加天数" value={bulkExtendDays} min={1} max={3650} onChange={setBulkExtendDays} hint="请输入 1-3650 天之间的整数" />
-              <div className="mt-2 grid grid-cols-4 gap-2">
-                {[1, 3, 7, 30].map((days) => (
-                  <button key={days} type="button" onClick={() => setBulkExtendDays(days)} className={`rounded-xl border px-2 py-2 text-xs font-bold transition ${bulkExtendDays === days ? 'border-[rgba(0,190,227,.75)] bg-[rgba(0,190,227,.16)] text-[var(--primary)]' : 'border-[rgba(231,246,253,.16)] bg-[rgba(255,255,255,.06)] text-[var(--muted-foreground)] hover:bg-[rgba(255,255,255,.10)]'}`}>{days} 天</button>
-                ))}
-              </div>
-            </div>
-            <Textarea label="操作备注" value={bulkReason} onChange={setBulkReason} hint="备注会写入操作日志，仅管理员可见。" />
-          </div>
-          {bulkPreview && (
-            <div className="mt-4 space-y-3">
-              <div className="rounded-[18px] border border-[rgba(0,190,227,.28)] bg-[rgba(0,190,227,.10)] p-4">
-                <p className="text-xs font-bold uppercase tracking-[.16em] text-[var(--primary)]">预计修改</p>
-                <p className="mt-1 font-display text-3xl font-black text-[var(--foreground)]">{bulkPreview.affected} 人</p>
-                <p className="mt-1 text-xs leading-5 text-[var(--muted-foreground)]">这些普通用户会增加 {bulkExtendDays || 7} 天有效期。</p>
-              </div>
-              <div className="rounded-[16px] border border-[rgba(231,246,253,.14)] bg-[rgba(255,255,255,.06)] p-4 text-sm leading-7 text-[var(--muted-foreground)]">
-                <div className="flex justify-between gap-3"><span>已到期，补偿后会恢复</span><b className="text-[var(--foreground)]">{bulkPreview.reactivatable} 人</b></div>
-                <div className="flex justify-between gap-3"><span>已停用，仅延长不启用</span><b className="text-[var(--foreground)]">{bulkPreview.disabled} 人</b></div>
-                <div className="flex justify-between gap-3"><span>长期有效，跳过不修改</span><b className="text-[var(--foreground)]">{bulkPreview.permanent} 人</b></div>
-                <div className="flex justify-between gap-3"><span>管理员，跳过不修改</span><b className="text-[var(--foreground)]">{bulkPreview.skippedAdmins} 人</b></div>
-              </div>
-            </div>
-          )}
-          <StatusNote tone="warning">确认后会立即更新以上预计修改用户；已停用账号不会自动启用，已到期账号若补偿后变为有效，会同步恢复媒体端访问。</StatusNote>
-        </Modal>
+      {actionDialog && (
+        <AdminActionDialog
+          config={actionDialog}
+          onClose={() => setActionDialog(null)}
+        />
       )}
-
-      {/* password modal */}
-      {pwTarget && (
-        <Modal title={`重置 ${pwTarget.username} 的密码`} onClose={() => setPwTarget(null)}>
-          <Field label="新密码"><input className="field" type="password" autoFocus value={pwValue} onChange={(e) => setPwValue(e.target.value)} placeholder="输入新密码" /></Field>
-          <p className="mt-2 text-xs text-[rgba(166,191,202,.72)]">密码会同步更新到媒体服务器。</p>
-          <div className="mt-5 flex gap-3">
-            <Button variant="secondary" className="flex-1" onClick={() => setPwTarget(null)}>取消</Button>
-            <Button variant="claret" className="flex-1" loading={busy === 'pw'} loadingText="保存中" onClick={submitPassword}>确认重置</Button>
-          </div>
-        </Modal>
-      )}
-
-      {/* expiry modal */}
-      {expiryTarget && (
-        <Modal title={`调整 ${expiryTarget.username} 的有效期`} onClose={() => setExpiryTarget(null)}>
-          <p className="text-sm text-[var(--muted-foreground)]">当前有效期：{expiryTarget.expiresAt ? new Date(expiryTarget.expiresAt).toLocaleString('zh-CN') : '长期有效'}</p>
-          <div className="mt-4 grid grid-cols-2 gap-2">
-            {[7, 30, 90, 365].map((d) => (
-              <Button key={d} variant="secondary" loading={busy === 'expiry'} onClick={() => submitExpiry({ extendDays: d })}>+{d} 天</Button>
-            ))}
-          </div>
-          <div className="mt-3 grid grid-cols-2 gap-2">
-            <Button variant="secondary" loading={busy === 'expiry'} onClick={() => submitExpiry({ extendDays: -30 })}>-30 天</Button>
-            <Button variant="secondary" loading={busy === 'expiry'} onClick={() => submitExpiry({ clear: true })}>设为长期</Button>
-          </div>
-          <div className="mt-4 flex justify-end">
-            <Button variant="secondary" onClick={() => setExpiryTarget(null)}>关闭</Button>
-          </div>
-        </Modal>
-      )}
-
-      {/* code delete modal */}
-      {codeDeleteTarget && (
-        <Modal title="删除卡密" onClose={() => setCodeDeleteTarget(null)}>
-          <p className="text-sm leading-6 text-[var(--muted-foreground)]">确定删除卡密 <span className="font-mono font-semibold text-[var(--foreground)]">{codeDeleteTarget.code}</span> 吗？删除后列表中不再显示，用户也不能继续使用。</p>
-          <div className="mt-5 flex justify-end gap-2">
-            <Button variant="secondary" onClick={() => setCodeDeleteTarget(null)}>取消</Button>
-            <Button variant="claret" loading={busy === `delete-code-${codeDeleteTarget.id}`} loadingText="删除中" onClick={deleteCode}><Trash2 size={15} /> 删除</Button>
-          </div>
-        </Modal>
-      )}
-
-      {/* confirm modal */}
-      {confirm && (
-        <Modal title={confirm.kind === 'delete' ? '删除账号' : confirm.kind === 'disable' ? '停用账号' : '启用账号'} onClose={() => setConfirm(null)}>
-          <p className="text-sm leading-6 text-[var(--muted-foreground)]">
-            {confirm.kind === 'delete' && <>将删除媒体服务器账号，并从门户列表隐藏 <b className="text-[var(--foreground)]">{confirm.user.username}</b>；后续可用同名重新创建，但原媒体端账号数据无法自动恢复。</>}
-            {confirm.kind === 'disable' && <>将停用账号 <b className="text-[var(--foreground)]">{confirm.user.username}</b>，该用户将无法登录媒体服务器。可随时重新启用。</>}
-            {confirm.kind === 'enable' && <>将重新启用账号 <b className="text-[var(--foreground)]">{confirm.user.username}</b>，恢复其媒体访问。</>}
-          </p>
-          <div className="mt-5 flex gap-3">
-            <Button variant="secondary" className="flex-1" onClick={() => setConfirm(null)}>取消</Button>
-            <Button variant={confirm.kind === 'delete' ? 'claret' : 'claret'} className="flex-1" loading={busy === 'confirm'} loadingText="处理中" onClick={runConfirm}>
-              {confirm.kind === 'delete' ? '确认删除' : confirm.kind === 'disable' ? '确认停用' : '确认启用'}
-            </Button>
-          </div>
-        </Modal>
-      )}
-
-      {prompt && <PromptModal title={prompt.title} body={prompt.body} onClose={() => setPrompt(null)} />}
     </ShellBackdrop>
   );
 }
 
-function DeliveryCard({ username, password, serverUrl }: { username: string; password: string; serverUrl: string }) {
-  const text = `你的 MoYin.CC 账号已开通\n账号：${username}\n初始密码：${password}\n服务地址：${serverUrl}\n入口：https://moyin.cc/dashboard\n客户端：EchoShelf 或管理员推荐的兼容客户端`;
-  return (
-    <div className="space-y-3 text-left">
-      <p className="text-sm leading-6 text-[var(--muted-foreground)]">账号创建成功。可直接复制下面这段发给用户：</p>
-      <pre className="whitespace-pre-wrap rounded-2xl border border-[rgba(231,246,253,.16)] bg-[rgba(255,255,255,.08)] p-4 text-xs leading-6 text-[var(--foreground)]">{text}</pre>
-      <Button variant="claret" className="w-full" onClick={() => navigator.clipboard.writeText(text)}><Copy size={15} /> 复制交付文案</Button>
-    </div>
-  );
-}
+function AdminActionDialog({ config, onClose }: { config: ActionDialogConfig; onClose: () => void }) {
+  const [values, setValues] = useState<Record<string, string>>(() => Object.fromEntries(
+    (config.fields || []).map((field) => [field.name, field.initial || '']),
+  ));
 
-function AdminFloatingNav({ tab, setTab }: { tab: AdminTab; setTab: (tab: AdminTab) => void }) {
-  const items: Array<{ key: AdminTab; label: string; icon: ReactNode }> = [
-    { key: 'overview', label: '概览', icon: <LayoutGrid size={17} /> },
-    { key: 'codes', label: '卡密', icon: <KeyRound size={17} /> },
-    { key: 'accounts', label: '账号', icon: <UserCog size={17} /> },
-
-    { key: 'users', label: '活跃度', icon: <Users size={17} /> },
-    { key: 'settings', label: '配置', icon: <Settings size={17} /> },
-  ];
-  return (
-    <div className="tabbar max-w-xl">
-      <div className="side-brand">
-        <span className="side-brand-mark">M</span>
-        <span><span className="side-brand-title block">MoYin.CC</span><span className="side-brand-sub block">管理台</span></span>
-      </div>
-      <p className="side-label">管理菜单</p>
-      {items.map((item) => (
-        <button key={item.key} onClick={() => setTab(item.key)} className={`tab-item ${tab === item.key ? 'tab-item-active' : ''}`}>{item.icon}{item.label}</button>
-      ))}
-    </div>
-  );
-}
-
-function DarkStatLight({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="rounded-[14px] border border-[rgba(231,246,253,.16)] bg-[rgba(255,255,255,.08)] p-4">
-      <p className="text-xs uppercase tracking-[.16em] text-[var(--muted-foreground)]">{label}</p>
-      <p className="mt-1 font-display text-2xl font-semibold text-[var(--foreground)]">{value}</p>
-    </div>
-  );
-}
-
-function Field({ label, children }: { label: string; children: ReactNode }) {
-  return <label className="block"><span className="text-sm font-semibold text-[var(--muted-foreground)]">{label}</span><div className="mt-2">{children}</div></label>;
-}
-
-function MiniBtn({ children, onClick, danger }: { children: ReactNode; onClick: () => void; danger?: boolean }) {
-  return (
-    <button onClick={onClick} className={`inline-flex min-h-9 items-center gap-1.5 rounded-[10px] border px-3 py-1.5 text-xs font-semibold transition ${danger ? 'border-[rgba(0,190,227,.32)] text-[var(--primary)] hover:bg-[rgba(0,190,227,.10)]' : 'border-[rgba(231,246,253,.16)] text-[var(--foreground)] hover:bg-[rgba(255,255,255,.08)]'}`}>{children}</button>
-  );
-}
-
-function StatusBadge({ status, isExpired }: { status: string; isExpired: boolean }) {
-  const label = isExpired && status === 'active' ? '已到期' : statusLabels[status] || status;
-  const tone = status === 'active' && !isExpired ? 'tag-sage' : status === 'disabled' || status === 'deleted' ? 'tag-claret' : 'tag-claret';
-  return <span className={`rounded-full px-2.5 py-0.5 text-[11px] font-semibold ${tone}`}>{label}</span>;
-}
-
-function Modal({ title, children, onClose, footer }: { title: string; children: ReactNode; onClose: () => void; footer?: ReactNode }) {
   return (
     <AccessibleModal
-      title={title}
+      title={config.title}
       onClose={onClose}
-      overlayClassName="fixed inset-0 z-[80] flex items-center justify-center overflow-y-auto bg-[rgba(26,23,20,.55)] p-4 pt-[calc(1rem+env(safe-area-inset-top))] backdrop-blur-sm"
-      contentClassName="flex max-h-[calc(100dvh-2rem-env(safe-area-inset-top)-env(safe-area-inset-bottom))] w-full max-w-md flex-col overflow-hidden rounded-[20px] border border-[rgba(231,246,253,.16)] bg-[rgba(18,30,45,.96)] shadow-2xl"
+      closeOnBackdrop={false}
+      contentClassName="sheet w-full max-w-lg rounded-[20px] p-6 sm:p-7"
     >
-      <div className="flex shrink-0 items-start justify-between gap-3 p-6 pb-0">
-        <h3 className="display-md text-[1.3rem]">{title}</h3>
-        <button type="button" onClick={onClose} className="grid size-11 shrink-0 place-items-center rounded-full text-[var(--muted-foreground)] hover:bg-[rgba(255,255,255,.08)]" aria-label="关闭"><X size={18} /></button>
-      </div>
-      <div className="mt-4 min-h-0 flex-1 overflow-y-auto overscroll-contain px-6 pb-5 pr-5">{children}</div>
-      {footer && <div className="shrink-0 border-t border-[rgba(231,246,253,.12)] bg-[rgba(18,30,45,.98)] p-4 pb-[calc(1rem+env(safe-area-inset-bottom))]">{footer}</div>}
+      <form
+        onSubmit={(event) => {
+          event.preventDefault();
+          void config.onSubmit(values);
+        }}
+      >
+        <h2 className="font-display text-2xl font-semibold">{config.title}</h2>
+        <p className="mt-3 text-sm leading-6 text-[var(--muted-foreground)]">{config.body}</p>
+        {!!config.fields?.length && (
+          <div className="mt-5 grid gap-4">
+            {config.fields.map((field) => (
+              <label key={field.name} className="block">
+                <span className="text-sm font-semibold text-[var(--muted-foreground)]">{field.label}</span>
+                {field.type === 'textarea' ? (
+                  <textarea
+                    className="field mt-2 min-h-24"
+                    required={field.required}
+                    value={values[field.name] || ''}
+                    onChange={(event) => setValues({ ...values, [field.name]: event.target.value })}
+                  />
+                ) : (
+                  <input
+                    className="field mt-2"
+                    type={field.type || 'text'}
+                    required={field.required}
+                    min={field.min}
+                    max={field.max}
+                    value={values[field.name] || ''}
+                    onChange={(event) => setValues({ ...values, [field.name]: event.target.value })}
+                  />
+                )}
+              </label>
+            ))}
+          </div>
+        )}
+        <div className="mt-6 grid gap-2 sm:grid-cols-2">
+          <Button type="button" variant="secondary" onClick={onClose}>取消</Button>
+          <Button type="submit" variant={config.danger ? 'danger' : 'claret'}>{config.confirmText}</Button>
+        </div>
+      </form>
     </AccessibleModal>
   );
 }
 
-function Text({ label, value, onChange }: { label: string; value: string; onChange: (v: string) => void }) {
-  return <label className="block"><span className="text-sm font-semibold text-[var(--muted-foreground)]">{label}</span><input className="field mt-2" value={value || ''} onChange={(e) => onChange(e.target.value)} /></label>;
+function Text({ label, value, onChange, type = 'text' }: { label: string; value: string; onChange: (value: string) => void; type?: string }) {
+  return <label className="block"><span className="text-sm font-semibold text-[var(--muted-foreground)]">{label}</span><input className="field mt-2" type={type} value={value || ''} onChange={(event) => onChange(event.target.value)} /></label>;
 }
-function Textarea({ label, value, onChange, hint, compact = false }: { label: string; value: string; onChange: (v: string) => void; hint?: string; compact?: boolean }) {
-  return <label className="block"><span className="text-sm font-semibold text-[var(--muted-foreground)]">{label}</span><textarea className={`field mt-2 ${compact ? 'min-h-20' : 'min-h-28'}`} value={value || ''} onChange={(e) => onChange(e.target.value)} />{hint && <span className="mt-1 block text-xs text-[rgba(166,191,202,.72)]">{hint}</span>}</label>;
+
+function Textarea({ label, value, onChange, compact = false }: { label: string; value: string; onChange: (value: string) => void; compact?: boolean }) {
+  return <label className="block"><span className="text-sm font-semibold text-[var(--muted-foreground)]">{label}</span><textarea className={`field mt-2 ${compact ? 'min-h-20' : 'min-h-28'}`} value={value || ''} onChange={(event) => onChange(event.target.value)} /></label>;
 }
-function UrlField({ label, value, onChange, optional = false }: { label: string; value: string; onChange: (v: string) => void; optional?: boolean }) {
+
+function UrlField({ label, value, onChange, optional = false }: { label: string; value: string; onChange: (value: string) => void; optional?: boolean }) {
   const href = /^https?:\/\//i.test(value.trim()) ? value.trim() : '';
   return (
     <label className="block">
       <span className="text-sm font-semibold text-[var(--muted-foreground)]">{label}{optional ? '（可空）' : ''}</span>
       <div className="mt-2 flex gap-2">
-        <input className="field min-w-0 flex-1" type="url" inputMode="url" value={value || ''} onChange={(e) => onChange(e.target.value)} />
-        {href && <a className="btn btn-secondary !min-h-11 !px-3" href={href} target="_blank" rel="noreferrer" aria-label={`打开${label}`}><ExternalLink size={15} /></a>}
+        <input className="field min-w-0 flex-1" type="url" value={value || ''} onChange={(event) => onChange(event.target.value)} />
+        {href && <a href={href} target="_blank" rel="noreferrer" className="btn btn-secondary !min-h-11 !px-3" aria-label={`打开${label}`}><ExternalLink size={15} /></a>}
       </div>
     </label>
   );
 }
-function NumberInput({ label, value, min = 0, max, disabled, onChange, hint }: { label: string; value: number; min?: number; max?: number; disabled?: boolean; onChange: (v: number) => void; hint?: string }) {
-  return <label className="block"><span className="text-sm font-semibold text-[var(--muted-foreground)]">{label}</span><input className="field mt-2 disabled:opacity-50" type="number" min={min} max={max} disabled={disabled} value={value} onChange={(e) => onChange(Math.max(min, Number(e.target.value) || min))} />{hint && <span className="mt-1 block text-xs text-[rgba(166,191,202,.72)]">{hint}</span>}</label>;
+
+function NumberInput({ label, value, onChange, min = 0, max }: { label: string; value: number; onChange: (value: number) => void; min?: number; max?: number }) {
+  return <label className="block"><span className="text-sm font-semibold text-[var(--muted-foreground)]">{label}</span><input className="field mt-2" type="number" min={min} max={max} value={value} onChange={(event) => onChange(Number(event.target.value))} /></label>;
 }
-function Select({ label, value, onChange, options, hint }: { label: string; value: string; onChange: (v: string) => void; options: Array<[string, string]>; hint?: string }) {
-  return <label className="block"><span className="text-sm font-semibold text-[var(--muted-foreground)]">{label}</span><select className="field mt-2" value={value} onChange={(e) => onChange(e.target.value)}>{options.map(([v, l]) => <option key={v} value={v}>{l}</option>)}</select>{hint && <span className="mt-1 block text-xs text-[rgba(166,191,202,.72)]">{hint}</span>}</label>;
+
+function Check({ label, checked, onChange }: { label: string; checked: boolean; onChange: (value: boolean) => void }) {
+  return <label className="flex min-h-11 cursor-pointer items-center justify-between gap-4 border-b border-[rgba(231,246,253,.10)] py-2 text-sm font-semibold"><span>{label}</span><input type="checkbox" checked={checked} onChange={(event) => onChange(event.target.checked)} className="size-5 accent-[var(--primary)]" /></label>;
 }
-function Check({ label, checked, onChange }: { label: string; checked: boolean; onChange: (v: boolean) => void }) {
-  return <label className="mt-3 flex min-h-12 items-center justify-between gap-3 rounded-[12px] border border-[rgba(231,246,253,.12)] bg-[rgba(255,255,255,.08)] px-4 py-3 text-sm font-semibold text-[var(--foreground)]"><span>{label}</span><input type="checkbox" checked={checked} onChange={(e) => onChange(e.target.checked)} className="size-4 accent-[var(--primary)]" /></label>;
+
+function Select({ label, value, onChange, options }: { label: string; value: string; onChange: (value: string) => void; options: Array<[string, string]> }) {
+  return <label className="block"><span className="text-sm font-semibold text-[var(--muted-foreground)]">{label}</span><select className="field mt-2" value={value} onChange={(event) => onChange(event.target.value)}>{options.map(([key, text]) => <option key={key} value={key}>{text}</option>)}</select></label>;
 }
-function CheckPanel({ label, checked, onChange }: { label: string; checked: boolean; onChange: (v: boolean) => void }) {
-  return <label className="flex min-h-[6rem] items-center justify-between gap-3 rounded-[16px] border border-[rgba(231,246,253,.16)] bg-[rgba(255,255,255,.08)] p-4 text-sm font-semibold text-[var(--foreground)]"><span>{label}</span><input type="checkbox" checked={checked} onChange={(e) => onChange(e.target.checked)} className="size-4 accent-[var(--primary)]" /></label>;
+
+function StatCard({ label, value }: { label: string; value: number }) {
+  return <div className="rounded-[14px] border border-[rgba(231,246,253,.14)] bg-[rgba(255,255,255,.06)] p-4"><p className="text-xs text-[var(--muted-foreground)]">{label}</p><p className="mt-1 font-display text-2xl font-semibold">{value}</p></div>;
+}
+
+function StatusPill({ user }: { user: AdminUser }) {
+  const status = user.isExpired && user.status === 'active' ? 'expired' : user.status;
+  const labels: Record<string, string> = { active: '正常', expired: '已到期', disabled: '已停用', deleted: '已删除', pending: '待启用' };
+  const tone = status === 'active' ? 'tag-sage' : 'tag-claret';
+  return <span className={`rounded-full px-2.5 py-0.5 text-[11px] font-semibold ${tone}`}>{labels[status] || status}</span>;
+}
+
+function SmallButton({ children, onClick, danger = false }: { children: ReactNode; onClick: () => void; danger?: boolean }) {
+  return <button type="button" onClick={onClick} className={`inline-flex min-h-9 items-center gap-1.5 rounded-[10px] border px-3 py-1.5 text-xs font-semibold transition ${danger ? 'border-[rgba(239,68,68,.35)] text-red-300 hover:bg-[rgba(239,68,68,.10)]' : 'border-[rgba(231,246,253,.16)] hover:bg-[rgba(255,255,255,.08)]'}`}>{children}</button>;
 }

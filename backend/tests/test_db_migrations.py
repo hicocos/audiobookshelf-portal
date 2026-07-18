@@ -67,6 +67,21 @@ def test_migrations_add_telegram_columns_table_and_unique_index_to_legacy_databa
 
     assert "ux_portal_users_telegram_id" in _indexes(engine, "portal_users")
     assert "ux_telegram_bind_tokens_code_hash" in _indexes(engine, "telegram_bind_tokens")
+    assert "ux_telegram_flow_sessions_telegram_id" in _indexes(engine, "telegram_flow_sessions")
+    assert "ux_password_reset_tokens_token_hash" in _indexes(engine, "password_reset_tokens")
+    assert "ux_telegram_notifications_dedupe_key" in _indexes(engine, "telegram_notifications")
+    assert "ix_telegram_notifications_delivery" in _indexes(engine, "telegram_notifications")
+    assert "ux_tg_group_memberships_user" in _indexes(
+        engine, "telegram_group_memberships"
+    )
+    assert "ix_tg_group_memberships_due" in _indexes(
+        engine, "telegram_group_memberships"
+    )
+    assert "ix_media_requests_status" in _indexes(engine, "media_requests")
+    assert "ix_point_accounts_leaderboard" in _indexes(engine, "point_accounts")
+    assert "ux_point_ledger_reference" in _indexes(engine, "point_ledger_entries")
+    assert "ux_daily_checkins_user_date" in _indexes(engine, "daily_checkins")
+    assert "ux_referral_invites_code" in _indexes(engine, "referral_invites")
 
 
 def test_migrations_are_idempotent():

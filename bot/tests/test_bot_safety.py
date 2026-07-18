@@ -1,5 +1,6 @@
 import json
 import logging
+import time
 
 import httpx
 import pytest
@@ -11,6 +12,8 @@ from app.main import (
     guarded_handler,
 )
 from app.logging_config import JsonFormatter
+from app.health import check_bot_health, write_bot_heartbeat
+from app.notifications import next_poll_delay
 
 
 class FakeMessage:
@@ -92,6 +95,18 @@ def test_invalid_error_json_uses_fallback_and_records_debug(caplog):
     assert "not JSON" in caplog.text
 
 
+def test_api_error_detail_never_leaks_raw_backend_english():
+    request = httpx.Request("POST", "http://internal/api/internal/tg/bind")
+    response = httpx.Response(
+        400,
+        json={"detail": "User account is disabled by upstream service"},
+        request=request,
+    )
+    error = httpx.HTTPStatusError("bad response", request=request, response=response)
+
+    assert _http_error_detail(error, "绑定失败，请稍后重试。") == "绑定失败，请稍后重试。"
+
+
 @pytest.mark.asyncio
 async def test_handler_logs_include_update_id_as_json(caplog):
     update = FakeUpdate()
@@ -106,3 +121,49 @@ async def test_handler_logs_include_update_id_as_json(caplog):
     payload = json.loads(JsonFormatter().format(record))
     assert payload["message"] == "handled"
     assert payload["update_id"] == 987
+
+
+def test_json_formatter_redacts_telegram_credentials():
+    record = logging.LogRecord(
+        name="test.bot",
+        level=logging.ERROR,
+        pathname=__file__,
+        lineno=1,
+        msg="POST https://api.telegram.org/bot123456:secret_TOKEN/getMe",
+        args=(),
+        exc_info=None,
+    )
+    payload = json.loads(JsonFormatter().format(record))
+    assert "secret_TOKEN" not in payload["message"]
+    assert "/bot[REDACTED]/getMe" in payload["message"]
+    assert payload["timestamp"].endswith("+08:00")
+
+
+def test_bot_health_requires_a_recent_heartbeat(tmp_path):
+    state_path = tmp_path / "bot-health.json"
+    with pytest.raises(SystemExit):
+        check_bot_health(str(state_path), max_age_seconds=60)
+
+    write_bot_heartbeat(str(state_path))
+    check_bot_health(str(state_path), max_age_seconds=60)
+
+    state_path.write_text(
+        json.dumps(
+            {
+                "healthy": True,
+                "telegramHealthy": True,
+                "apiHealthy": True,
+                "checkedAt": time.time() - 61,
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(SystemExit, match="stale"):
+        check_bot_health(str(state_path), max_age_seconds=60)
+
+
+def test_notification_polling_backs_off_when_idle_and_resets_on_work():
+    assert next_poll_delay(5, base_seconds=5, had_work=False, failed=False) == 10
+    assert next_poll_delay(40, base_seconds=5, had_work=False, failed=False) == 60
+    assert next_poll_delay(60, base_seconds=5, had_work=True, failed=False) == 5
+    assert next_poll_delay(5, base_seconds=5, had_work=False, failed=True) == 10

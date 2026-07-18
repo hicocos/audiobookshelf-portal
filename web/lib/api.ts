@@ -42,11 +42,68 @@ export type PublicSettings = {
     lastInactivityCheckAt?: string | null;
     lastInactivityDisabled?: number;
   };
+  telegram: {
+    renewalEnabled: boolean;
+    passwordResetEnabled: boolean;
+    recentListeningEnabled: boolean;
+    announcementsEnabled: boolean;
+    lifecycleNotificationsEnabled: boolean;
+    adminEnabled: boolean;
+    groupMembershipEnabled: boolean;
+    requiredGroupId: string;
+    requiredGroupInviteUrl: string;
+    groupGraceHours: number;
+    requestsEnabled: boolean;
+    checkinEnabled: boolean;
+    pointsRedemptionEnabled: boolean;
+    referralEnabled: boolean;
+    leaderboardEnabled: boolean;
+    checkinBasePoints: number;
+    checkinStreakBonusEvery: number;
+    checkinStreakBonusPoints: number;
+    pointsPerDay: number;
+    maxRedeemDays: number;
+    referralRewardPoints: number;
+    referralInviteValidDays: number;
+    referralAccountDays: number;
+    referralMonthlyLimit: number;
+    leaderboardLimit: number;
+    expiryReminderDays: number[];
+  };
   sections: {
     benefits: Array<{ title: string; body: string }>;
     steps: string[];
     faq: Array<{ q: string; a: string }>;
   };
+};
+
+export const DEFAULT_TELEGRAM_SETTINGS: PublicSettings['telegram'] = {
+  renewalEnabled: true,
+  passwordResetEnabled: true,
+  recentListeningEnabled: true,
+  announcementsEnabled: true,
+  lifecycleNotificationsEnabled: true,
+  adminEnabled: true,
+  groupMembershipEnabled: false,
+  requiredGroupId: '',
+  requiredGroupInviteUrl: '',
+  groupGraceHours: 72,
+  requestsEnabled: true,
+  checkinEnabled: true,
+  pointsRedemptionEnabled: true,
+  referralEnabled: true,
+  leaderboardEnabled: false,
+  checkinBasePoints: 10,
+  checkinStreakBonusEvery: 7,
+  checkinStreakBonusPoints: 20,
+  pointsPerDay: 100,
+  maxRedeemDays: 30,
+  referralRewardPoints: 50,
+  referralInviteValidDays: 7,
+  referralAccountDays: 30,
+  referralMonthlyLimit: 3,
+  leaderboardLimit: 10,
+  expiryReminderDays: [7, 3, 1, 0],
 };
 
 export type PortalUser = {
@@ -58,6 +115,19 @@ export type PortalUser = {
   telegramBound?: boolean;
   telegramUsername?: string | null;
   telegramBoundAt?: string | null;
+};
+
+export type UserCapabilities = {
+  canListen: boolean;
+  canRenew: boolean;
+  canChangePassword: boolean;
+  canCheckin: boolean;
+  canRedeemPoints: boolean;
+  canRefer: boolean;
+  canRequest: boolean;
+  canViewLeaderboard: boolean;
+  canAdmin: boolean;
+  unavailableReasons: Record<string, string>;
 };
 
 export type TelegramBindTokenResponse = {
@@ -88,25 +158,6 @@ export type LibrarySummary = {
   stats: { libraryCount: number; itemPreviewCount: number; progressCount: number };
 };
 
-export type AdminLibraryOverview = {
-  libraries: LibrarySummary['libraries'];
-  users: Array<{
-    id: string;
-    username: string;
-    type: string;
-    isActive: boolean;
-    lastSeen?: string | null;
-    latestListenAt?: string | null;
-    progressCount: number;
-    portalUserId?: string | null;
-    portalStatus?: string | null;
-    portalCreatedAt?: string | null;
-    inactivityCandidate?: boolean;
-    inactivityReason?: string;
-  }>;
-  stats: { libraryCount: number; upstreamUserCount: number; activeUserCount: number; progressCount: number; portalUserCount?: number; inactiveCandidateCount?: number };
-};
-
 export type AdminUser = {
   id: string;
   username: string;
@@ -129,8 +180,115 @@ export type AdminUserList = {
   upstreamAvailable: boolean;
 };
 
-export type AdminLibrary = { id: string; name: string; mediaType: string; icon?: string | null; lastScan?: string | null };
-export type AdminLibraryItem = { id: string; libraryId?: string | null; title: string; author?: string; narrator?: string; durationHours: number; numTracks: number; addedAt?: string | null };
+export type RewardSummary = {
+  balance: number;
+  lifetimeEarned: number;
+  leaderboardOptIn: boolean;
+  streak: number;
+  lastCheckinDate: string | null;
+  history: Array<{ amount: number; balanceAfter: number; kind: string; createdAt: string }>;
+};
+
+export type LeaderboardEntry = {
+  rank: number;
+  displayName: string;
+  lifetimeEarned: number;
+};
+
+export type ReferralRecord = {
+  id: string;
+  code: string | null;
+  expiresAt: string;
+  rewardPoints: number;
+  used: boolean;
+  settledAt: string | null;
+  createdAt: string;
+};
+
+export type MediaRequestRecord = {
+  id: string;
+  username?: string;
+  kind: 'book' | 'podcast';
+  title: string;
+  details: string | null;
+  status: string;
+  adminNote: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type AdminOperationsOverview = {
+  users: { active: number; expired: number; disabled: number };
+  pendingRequests: number;
+  notifications: { pending: number; retry: number; sending: number; failed: number };
+  groupGrace: number;
+  referrals: number;
+  pointAccounts: number;
+  worker: { healthy: boolean; reason?: string; lagSeconds?: number; lastError?: string | null };
+};
+
+export type AdminNotification = {
+  id: string;
+  telegramId: string;
+  kind: string;
+  message: string;
+  status: string;
+  attempts: number;
+  lastError: string | null;
+  createdAt: string;
+  sentAt: string | null;
+};
+
+export type AdminMembership = {
+  id: string;
+  username: string;
+  telegramId: string;
+  groupId: string;
+  status: string;
+  graceExpiresAt: string | null;
+  lastCheckedAt: string;
+};
+
+export type AuditEntry = {
+  id: string;
+  actor: string | null;
+  action: string;
+  targetType: string | null;
+  targetId: string | null;
+  detail: string | null;
+  createdAt: string;
+};
+
+export type BroadcastAudience = 'active' | 'expiring_7d' | 'expired' | 'all_bound';
+
+export type BroadcastPreview = {
+  audience: BroadcastAudience;
+  count: number;
+  sample: string[];
+};
+
+export type AdminLibraryOverview = {
+  libraries: LibrarySummary['libraries'];
+  users: Array<{
+    id: string;
+    username: string;
+    type: string;
+    isActive: boolean;
+    latestListenAt?: string | null;
+    progressCount: number;
+    portalStatus?: string | null;
+    inactivityCandidate?: boolean;
+    inactivityReason?: string;
+  }>;
+  stats: {
+    libraryCount: number;
+    upstreamUserCount: number;
+    activeUserCount: number;
+    progressCount: number;
+    portalUserCount: number;
+    inactiveCandidateCount: number;
+  };
+};
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL || 'http://localhost:8019';
 
@@ -175,6 +333,10 @@ function translateError(detail: unknown, status: number): string {
     '当前密码不正确。': '当前密码不正确。',
     '新密码不能与当前密码相同。': '新密码不能与当前密码相同。',
     '媒体服务器暂时不可用，密码未修改，请稍后重试。': '媒体服务器暂时不可用，密码未修改，请稍后重试。',
+    'invalid or expired password reset token': '重置链接无效或已过期，请回到 Telegram Bot 重新生成。',
+    'invalid password reset token': '重置链接无效，请回到 Telegram Bot 重新生成。',
+    'account is not eligible for password reset': '当前账号状态不能重置密码，请联系管理员。',
+    'media server unavailable; password not changed': '媒体服务器暂时不可用，密码未修改，请稍后重试。',
   };
   if (dictionary[text]) return dictionary[text];
   if (text.startsWith('Password must be at least')) {
@@ -220,7 +382,9 @@ function combineSignals(primary: AbortSignal | null | undefined, timeout: AbortS
 
 async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   const headers = new Headers(options.headers);
-  headers.set('Content-Type', 'application/json');
+  if (options.body != null && !headers.has('Content-Type')) {
+    headers.set('Content-Type', 'application/json');
+  }
   let response: Response;
   try {
     const timeout = AbortSignal.timeout(DEFAULT_TIMEOUT_MS);
@@ -255,6 +419,14 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
 export const api = {
   config: () => request<PublicSettings>('/api/public/config'),
   sessionStatus: () => request<{ authenticated: boolean; admin: boolean; status?: string; role?: string }>('/api/public/session-status'),
+  validatePasswordReset: (token: string) =>
+    request<{ valid: boolean; username: string; expiresAt: string; passwordMinLength: number }>('/api/public/password-reset/validate', {
+      method: 'POST', body: JSON.stringify({ token }),
+    }),
+  resetPassword: (token: string, newPassword: string) =>
+    request<{ ok: boolean; username: string }>('/api/public/password-reset', {
+      method: 'POST', body: JSON.stringify({ token, newPassword }),
+    }),
   setupStatus: () => request<{ initialized: boolean; setupAvailable: boolean }>('/api/admin/setup-status'),
   register: (username: string, password: string, inviteCode: string) =>
     request<{ user: PortalUser }>('/api/auth/register', {
@@ -264,9 +436,9 @@ export const api = {
     request<{ user: PortalUser }>('/api/auth/login', {
       method: 'POST', body: JSON.stringify({ username, password }),
     }),
-  me: () => request<{ user: PortalUser }>('/api/me'),
+  me: () => request<{ user: PortalUser; capabilities: UserCapabilities }>('/api/me'),
+  exportMyData: () => request<Record<string, unknown>>('/api/me/export'),
   librarySummary: () => request<LibrarySummary>('/api/library/summary'),
-  adminLibraryOverview: () => request<AdminLibraryOverview>('/api/library/admin/overview'),
   redeem: (code: string) => request<{ user: PortalUser; redeemedCode: string; upstreamReactivated?: boolean; message?: string }>('/api/me/redeem', {
     method: 'POST', body: JSON.stringify({ code }),
   }),
@@ -276,6 +448,15 @@ export const api = {
     }),
   generateTelegramBindToken: () => request<TelegramBindTokenResponse>('/api/me/telegram/bind-token', { method: 'POST' }),
   unbindTelegram: () => request<{ ok: boolean; user: PortalUser }>('/api/me/telegram/binding', { method: 'DELETE' }),
+  rewards: () => request<RewardSummary>('/api/me/rewards'),
+  checkin: () => request<{ alreadyCheckedIn: boolean; date: string; streak: number; pointsAwarded: number; balance: number }>('/api/me/checkin', { method: 'POST' }),
+  redeemPoints: (days: number, idempotencyKey: string) => request<{ days: number; cost: number; balance: number; expiresAt: string; upstreamReactivated: boolean; idempotentReplay: boolean }>('/api/me/points/redeem', { method: 'POST', body: JSON.stringify({ days, idempotencyKey }) }),
+  leaderboard: () => request<{ entries: LeaderboardEntry[] }>('/api/me/leaderboard'),
+  setLeaderboardOptIn: (enabled: boolean) => request<{ enabled: boolean }>('/api/me/leaderboard/opt-in', { method: 'POST', body: JSON.stringify({ enabled }) }),
+  referrals: () => request<{ items: ReferralRecord[] }>('/api/me/referrals'),
+  createReferral: () => request<{ code: string; expiresAt: string; accountDays: number; rewardPoints: number; existing: boolean }>('/api/me/referrals', { method: 'POST' }),
+  mediaRequests: () => request<{ items: MediaRequestRecord[] }>('/api/me/requests'),
+  createMediaRequest: (payload: { kind: 'book' | 'podcast'; title: string; details?: string }) => request<{ item: MediaRequestRecord }>('/api/me/requests', { method: 'POST', body: JSON.stringify(payload) }),
   createCodes: (payload: { type: string; durationDays: number; count: number; maxUses: number; note?: string }) =>
     request<{ codes: CodeRecord[] }>('/api/admin/codes', { method: 'POST', body: JSON.stringify(payload) }),
   listCodes: () => request<{ codes: CodeRecord[] }>('/api/admin/codes'),
@@ -283,13 +464,13 @@ export const api = {
     request<{ code: CodeRecord }>(`/api/admin/codes/${codeId}`, { method: 'PATCH', body: JSON.stringify({ status }) }),
   deleteCode: (codeId: string) =>
     request<{ ok: boolean; id: string }>(`/api/admin/codes/${codeId}`, { method: 'DELETE' }),
-  getPublicSettings: () => request<{ settings: PublicSettings }>('/api/admin/settings/public'),
-  updatePublicSettings: (payload: Partial<PublicSettings>) =>
-    request<{ settings: PublicSettings }>('/api/admin/settings/public', { method: 'PATCH', body: JSON.stringify(payload) }),
-  runInactivityCheck: () =>
-    request<{ result: { enabled: boolean; checked: number; disabled: number; candidates?: Array<Record<string, unknown>> }; settings: PublicSettings }>('/api/admin/inactivity/check', { method: 'POST' }),
-
-  // --- Admin user management (replaces direct ABS backend) ---
+  getPublicSettings: () => request<{ settings: PublicSettings; revision: string }>('/api/admin/settings/public'),
+  updatePublicSettings: (payload: Partial<PublicSettings>, revision?: string) =>
+    request<{ settings: PublicSettings; revision: string }>('/api/admin/settings/public', {
+      method: 'PATCH',
+      headers: revision ? { 'If-Match': revision } : undefined,
+      body: JSON.stringify(payload),
+    }),
   adminListUsers: () => request<AdminUserList>('/api/admin/users'),
   adminCreateUser: (payload: { username: string; password: string; durationDays: number; email?: string; note?: string }) =>
     request<{ user: AdminUser }>('/api/admin/users', { method: 'POST', body: JSON.stringify(payload) }),
@@ -305,9 +486,16 @@ export const api = {
     request<{ summary: { matched: number; updated: number; reactivated: number; skippedPermanent: number; skippedAdmins: number }; users: AdminUser[] }>('/api/admin/users/bulk/expiry', { method: 'POST', body: JSON.stringify(payload) }),
   adminDeleteUser: (userId: string) =>
     request<{ ok: boolean; id: string }>(`/api/admin/users/${userId}`, { method: 'DELETE' }),
-
-  // --- Admin media library browser (read-only) ---
-  adminListLibraries: () => request<{ libraries: AdminLibrary[] }>('/api/library/admin/libraries'),
-  adminListLibraryItems: (libraryId: string, limit = 50) =>
-    request<{ libraryId: string; items: AdminLibraryItem[]; count: number; limit: number }>(`/api/library/admin/libraries/${libraryId}/items?limit=${limit}`),
+  adminOperationsOverview: () => request<AdminOperationsOverview>('/api/admin/operations/overview'),
+  adminRequests: (status?: string) => request<{ items: MediaRequestRecord[] }>(`/api/admin/operations/requests${status ? `?status=${encodeURIComponent(status)}` : ''}`),
+  adminUpdateRequest: (requestId: string, status: 'accepted' | 'available' | 'rejected', note?: string) => request<{ item: MediaRequestRecord }>(`/api/admin/operations/requests/${requestId}`, { method: 'POST', body: JSON.stringify({ status, note }) }),
+  adminNotifications: (status?: string) => request<{ items: AdminNotification[] }>(`/api/admin/operations/notifications${status ? `?status=${encodeURIComponent(status)}` : ''}`),
+  adminRetryNotification: (notificationId: string) => request<{ ok: boolean; status: string }>(`/api/admin/operations/notifications/${notificationId}/retry`, { method: 'POST' }),
+  adminPreviewBroadcast: (audience: BroadcastAudience) => request<BroadcastPreview>(`/api/admin/operations/broadcast/preview?audience=${encodeURIComponent(audience)}`),
+  adminCreateBroadcast: (payload: { audience: BroadcastAudience; message: string; confirmCount: number; idempotencyKey: string }) => request<{ ok: boolean; batchId: string; queued: number; idempotentReplay: boolean }>('/api/admin/operations/broadcast', { method: 'POST', body: JSON.stringify(payload) }),
+  adminMemberships: (status?: string) => request<{ items: AdminMembership[] }>(`/api/admin/operations/memberships${status ? `?status=${encodeURIComponent(status)}` : ''}`),
+  adminAudit: (limit = 100) => request<{ items: AuditEntry[] }>(`/api/admin/operations/audit?limit=${limit}`),
+  adminAdjustPoints: (payload: { userId: string; amount: number; note: string }) => request<{ ok: boolean; balance: number }>('/api/admin/operations/points/adjust', { method: 'POST', body: JSON.stringify(payload) }),
+  adminPreviewInactivity: () => request<{ checked: number; candidates: Array<{ portalUserId: string; username: string; shouldDisable: boolean; reason: string; latestListenAt: string | null }> }>('/api/admin/operations/inactivity/preview', { method: 'POST' }),
+  adminLibraryOverview: () => request<AdminLibraryOverview>('/api/library/admin/overview'),
 };

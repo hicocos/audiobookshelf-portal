@@ -1,15 +1,18 @@
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol
 
 from sqlmodel import Session, select
 
 from app.models import AuditLog, PortalUser, utcnow
+from app.services.reconciliation import enqueue_reconciliation_job
 
 
 class AbsUserClient(Protocol):
     async def list_users(self) -> list[dict[str, Any]]: ...
+
     async def update_user(self, user_id: str, payload: dict[str, Any]) -> dict[str, Any]: ...
 
 
@@ -25,9 +28,7 @@ def _ms_to_datetime(value: Any) -> datetime | None:
 def _aware(value: datetime | None) -> datetime | None:
     if value is None:
         return None
-    if value.tzinfo is None:
-        return value.replace(tzinfo=UTC)
-    return value
+    return value.replace(tzinfo=UTC) if value.tzinfo is None else value
 
 
 def latest_listen_at(upstream_user: dict[str, Any]) -> datetime | None:
@@ -56,6 +57,8 @@ def should_disable_for_inactivity(
     created_at = _aware(portal_user.created_at) or now
     if portal_user.role in {"admin", "root"}:
         return False, "管理员账号不参与活跃度停用"
+    if portal_user.expires_at is None:
+        return False, "永久账号不参与活跃度停用"
     if portal_user.status != "active":
         return False, "账号不是正常状态"
     if not portal_user.abs_user_id:
@@ -98,6 +101,7 @@ async def sync_inactive_users(
     checked = 0
     disabled = 0
     candidates: list[dict[str, Any]] = []
+    failures: list[dict[str, str]] = []
     for user in portal_users:
         checked += 1
         upstream_user = by_id.get(str(user.abs_user_id)) if user.abs_user_id else None
@@ -117,27 +121,75 @@ async def sync_inactive_users(
             "latestListenAt": latest.isoformat() if latest else None,
             "createdAt": _aware(user.created_at).isoformat() if user.created_at else None,
         }
-        candidates.append(candidate)
+        if should_disable:
+            candidates.append(candidate)
         if should_disable and not dry_run:
-            await abs_client.update_user(str(user.abs_user_id), {"isActive": False})
-            user.status = "disabled"
-            user.session_version = int(user.session_version or 0) + 1
-            user.updated_at = utcnow()
-            session.add(user)
-            session.add(AuditLog(
-                actor_username=actor or "system",
-                action="disable_inactive_user",
+            next_session_version = int(user.session_version or 0) + 1
+            job = enqueue_reconciliation_job(
+                session,
+                idempotency_key=f"inactivity-disable:{user.id}:{next_session_version}",
+                operation="set_active",
                 target_type="portal_user",
                 target_id=user.id,
-                detail_json=(
-                    f'{{"reason":"{reason}","inactiveDays":{inactive_days},'
-                    f'"newUserGraceDays":{new_user_grace_days}}}'
-                ),
-            ))
+                abs_user_id=str(user.abs_user_id),
+                payload={"isActive": False},
+            )
+            user.status = "disabled"
+            user.session_version = next_session_version
+            user.updated_at = utcnow()
+            session.add(user)
+            session.add(
+                AuditLog(
+                    actor_username=actor or "system",
+                    action="disable_inactive_user",
+                    target_type="portal_user",
+                    target_id=user.id,
+                    detail_json=json.dumps(
+                        {
+                            "reason": reason,
+                            "inactiveDays": inactive_days,
+                            "newUserGraceDays": new_user_grace_days,
+                        },
+                        ensure_ascii=False,
+                    ),
+                )
+            )
+            # Persist the local decision and its repair job atomically before
+            # touching ABS.  A failed/ambiguous upstream call is then safely
+            # replayed by the worker instead of leaving an untracked split.
+            try:
+                session.commit()
+            except Exception as exc:  # noqa: BLE001 - isolate one account
+                session.rollback()
+                failures.append(
+                    {
+                        "portalUserId": user.id,
+                        "stage": "portal_commit",
+                        "error": type(exc).__name__,
+                    }
+                )
+                continue
             disabled += 1
+            try:
+                await abs_client.update_user(str(user.abs_user_id), {"isActive": False})
+            except Exception as exc:  # noqa: BLE001 - durable job will retry
+                failures.append(
+                    {
+                        "portalUserId": user.id,
+                        "stage": "audiobookshelf",
+                        "error": type(exc).__name__,
+                    }
+                )
+            else:
+                now = utcnow()
+                job.status = "succeeded"
+                job.attempts = int(job.attempts or 0) + 1
+                job.last_error = None
+                job.succeeded_at = now
+                job.updated_at = now
+                session.add(job)
+                session.commit()
 
-    if not dry_run:
-        session.commit()
     return {
         "enabled": True,
         "checked": checked,
@@ -146,4 +198,6 @@ async def sync_inactive_users(
         "inactiveDays": inactive_days,
         "newUserGraceDays": new_user_grace_days,
         "candidates": candidates,
+        "failed": len(failures),
+        "failures": failures,
     }

@@ -19,10 +19,10 @@ services:
       TZ: Asia/Shanghai
       TINI_SUBREAPER: "1"
     volumes:
-      - /www/wwwroot/audiobook/config:/config
-      - /www/wwwroot/audiobook/metadata:/metadata
-      - /www/wwwroot/books:/audiobooks
-      - /www/podcasts:/podcasts
+      - ${ABS_CONFIG_PATH:-/www/wwwroot/audiobook/config}:/config
+      - ${ABS_METADATA_PATH:-/www/wwwroot/audiobook/metadata}:/metadata
+      - ${ABS_AUDIOBOOKS_PATH:-/www/wwwroot/books}:/audiobooks
+      - ${ABS_PODCASTS_PATH:-/www/podcasts}:/podcasts
     ports:
       - "127.0.0.1:13268:80"
     healthcheck:
@@ -60,7 +60,6 @@ services:
     env_file: .env.api
     environment:
       TZ: Asia/Shanghai
-      METRICS_TOKEN: ${METRICS_TOKEN:-}
     volumes:
       - moyin-data:/data
     ports:
@@ -131,6 +130,7 @@ services:
       - no-new-privileges:true
 
   moyin-web:
+    image: audiobookshelf-portal-web:${BUILD_VERSION:-dev}
     build:
       context: ./web
       args:
@@ -175,6 +175,7 @@ services:
       - no-new-privileges:true
 
   moyin-bot:
+    image: audiobookshelf-portal-bot:${BUILD_VERSION:-dev}
     build:
       context: ./bot
       args: *build-args
@@ -194,7 +195,7 @@ services:
         - CMD
         - python
         - -c
-        - "import os,urllib.request; req=urllib.request.Request(os.environ['WEB_INTERNAL_API_BASE'].rstrip('/') + '/api/public/health/live'); urllib.request.urlopen(req, timeout=5).read()"
+        - "from app.health import check_bot_health; check_bot_health()"
       interval: 30s
       timeout: 5s
       retries: 3
@@ -207,6 +208,7 @@ services:
     read_only: true
     tmpfs:
       - /tmp:rw,noexec,nosuid,size=32m
+      - /run/moyin-bot:rw,noexec,nosuid,size=1m,uid=10002,gid=10002,mode=0700
     cap_drop:
       - ALL
     security_opt:
