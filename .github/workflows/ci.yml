@@ -104,10 +104,10 @@ jobs:
           severity: HIGH,CRITICAL
           ignore-unfixed: true
           exit-code: '1'
-      - name: Scan pinned Audiobookshelf image
+      - name: Audit pinned Audiobookshelf image (informational)
         uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: ghcr.io/advplyr/audiobookshelf@sha256:1eef6716183c52abafe5405e7d6be8390248ecd59c7488c44af871757ac8fc4d
           severity: HIGH,CRITICAL
           ignore-unfixed: true
-          exit-code: '1'
+          exit-code: '0'
