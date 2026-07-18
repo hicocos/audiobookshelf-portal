@@ -1,6 +1,30 @@
+import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy.pool import StaticPool
+from sqlmodel import Session, SQLModel, create_engine
 
+from app.db import get_session
 from app.main import app
+
+
+@pytest.fixture(autouse=True)
+def isolated_database():
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    SQLModel.metadata.create_all(engine)
+
+    def override_session():
+        with Session(engine) as session:
+            yield session
+
+    app.dependency_overrides[get_session] = override_session
+    try:
+        yield
+    finally:
+        app.dependency_overrides.pop(get_session, None)
 
 
 def test_health_endpoint_returns_ok():
@@ -19,6 +43,7 @@ def test_session_status_is_public_and_quiet_for_anonymous_visits():
 
     assert response.status_code == 200
     assert response.json() == {"authenticated": False, "admin": False}
+
 
 def test_public_config_exposes_safe_values_only(monkeypatch):
     monkeypatch.setenv("NEXT_PUBLIC_SITE_NAME", "MoYin.CC")
