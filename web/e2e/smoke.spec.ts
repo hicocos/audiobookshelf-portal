@@ -45,6 +45,8 @@ const fulfillApi = (payload: object) => async (route: Route) => {
   await route.fulfill({ json: payload, headers });
 };
 
+const meEndpoint = /\/api\/me(?:\?.*)?$/;
+
 test.beforeEach(async ({ page }) => {
   await page.route('**/api/public/config', fulfillApi(publicSettings));
   await page.route('**/api/public/session-status', fulfillApi({ authenticated: false, admin: false }));
@@ -100,8 +102,7 @@ test('账号中心使用可展开和收缩的导航抽屉', async ({ context, pa
     canAdmin: false,
     unavailableReasons: {},
   };
-  await page.route('**/api/me{,/**}', fulfillApi({ user: { id: 'u1', username: 'alice', role: 'user', status: 'active', expiresAt: '2027-01-01T00:00:00Z' }, capabilities }));
-  await page.route('http://localhost:8019/api/me{,/**}', fulfillApi({ user: { id: 'u1', username: 'alice', role: 'user', status: 'active', expiresAt: '2027-01-01T00:00:00Z' }, capabilities }));
+  await page.route(meEndpoint, fulfillApi({ user: { id: 'u1', username: 'alice', role: 'user', status: 'active', expiresAt: '2027-01-01T00:00:00Z' }, capabilities }));
   await page.route('**/api/library/summary', fulfillApi({ libraries: [], items: [], progress: [], stats: { libraryCount: 0, itemPreviewCount: 0, progressCount: 0 } }));
   await page.route('**/api/me/rewards', fulfillApi({ balance: 120, lifetimeEarned: 260, leaderboardOptIn: true, streak: 3, lastCheckinDate: '2026-07-17', history: [] }));
   await page.route('**/api/me/referrals', fulfillApi({ items: [] }));
@@ -139,7 +140,7 @@ test('账号中心按能力隐藏入口并且不请求禁用功能', async ({ co
   await context.addCookies([{ name: 'moyin_session', value: 'e2e-session', domain: '127.0.0.1', path: '/' }]);
   const requested: string[] = [];
   page.on('request', (request) => requested.push(new URL(request.url()).pathname));
-  await page.route('**/api/me{,/**}', fulfillApi({
+  await page.route(meEndpoint, fulfillApi({
     user: { id: 'u2', username: 'expired-user', role: 'user', status: 'expired', expiresAt: '2026-07-01T00:00:00Z' },
     capabilities: {
       canListen: false,
@@ -180,7 +181,7 @@ test('管理员登录页不预填或暗示固定用户名', async ({ page }) => 
 
 test('管理员账号中心不暴露管理入口或管理员用户名', async ({ context, page }) => {
   await context.addCookies([{ name: 'moyin_session', value: 'e2e-session', domain: '127.0.0.1', path: '/' }]);
-  await page.route('**/api/me{,/**}', fulfillApi({
+  await page.route(meEndpoint, fulfillApi({
     user: { id: 'admin', username: 'admin', role: 'root', status: 'active', expiresAt: null },
     capabilities: {
       canListen: true,
