@@ -29,7 +29,9 @@ ENV NODE_ENV=production \
     BUILD_VERSION="${BUILD_VERSION}" \
     BUILD_COMMIT="${BUILD_COMMIT}" \
     BUILD_DATE="${BUILD_DATE}"
-RUN useradd -m -u 1001 nextjs
+RUN useradd -m -u 1001 nextjs \
+    && rm -rf /usr/local/lib/node_modules/npm \
+    && rm -f /usr/local/bin/npm /usr/local/bin/npx
 COPY --from=builder /app/.next/standalone ./
 COPY --from=builder /app/.next/static ./.next/static
 COPY --from=builder --chown=nextjs:nextjs /app/public ./public
