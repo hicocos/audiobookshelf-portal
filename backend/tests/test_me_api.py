@@ -443,3 +443,25 @@ def test_delete_telegram_binding_endpoint_clears_binding_fields():
     finally:
         teardown_client()
 
+
+def test_delete_telegram_binding_rejects_required_binding_account():
+    client, engine = make_client()
+    try:
+        with Session(engine) as session:
+            user = create_user(session)
+            user.telegram_id = "987654321"
+            user.telegram_bound_at = utcnow()
+            user.telegram_binding_required = True
+            session.add(user)
+            session.commit()
+            user_id = user.id
+
+        response = client.delete("/api/me/telegram/binding", headers=user_headers(user_id))
+
+        assert response.status_code == 409
+        assert "必须绑定" in response.json()["detail"]
+        with Session(engine) as session:
+            assert session.get(PortalUser, user_id).telegram_id == "987654321"
+    finally:
+        teardown_client()
+

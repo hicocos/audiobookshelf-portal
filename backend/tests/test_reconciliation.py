@@ -5,7 +5,7 @@ from sqlmodel import Session, SQLModel, create_engine, select
 
 from app.db import get_session
 from app.main import app
-from app.models import ReconciliationJob, utcnow
+from app.models import PortalUser, ReconciliationJob, utcnow
 from app.routers.auth import get_abs_client_factory
 from app.services.reconciliation import process_reconciliation_jobs
 
@@ -48,6 +48,15 @@ def test_failed_reactivation_is_persisted_and_visible_to_admin(
     app.dependency_overrides[get_abs_client_factory] = lambda: (lambda: fake)
     try:
         with Session(engine) as session:
+            session.add(
+                PortalUser(
+                    id="portal-1",
+                    username="reader",
+                    password_hash="hash",
+                    abs_user_id="abs-1",
+                    abs_username="reader",
+                )
+            )
             session.add(
                 ReconciliationJob(
                     operation="set_active",
@@ -94,3 +103,72 @@ def test_duplicate_delivery_of_succeeded_job_does_not_repeat_upstream_write():
 
     assert result == {"processed": 0, "succeeded": 0, "failed": 0}
     assert fake.updated == []
+
+
+def test_stale_disable_job_converges_to_latest_active_portal_state():
+    engine = create_engine("sqlite:///:memory:")
+    SQLModel.metadata.create_all(engine)
+    fake = ReactivationClient()
+    with Session(engine) as session:
+        session.add(
+            PortalUser(
+                id="portal-1",
+                username="reader",
+                password_hash="hash",
+                abs_user_id="abs-1",
+                abs_username="reader",
+                status="active",
+                expires_at=utcnow() + timedelta(days=30),
+            )
+        )
+        session.add(
+            ReconciliationJob(
+                operation="set_active",
+                target_type="portal_user",
+                target_id="portal-1",
+                abs_user_id="abs-1",
+                payload_json='{"isActive":false}',
+                status="pending",
+                next_retry_at=utcnow() - timedelta(seconds=1),
+            )
+        )
+        session.commit()
+
+        result = __import__("asyncio").run(process_reconciliation_jobs(session, fake))
+
+    assert result == {"processed": 1, "succeeded": 1, "failed": 0}
+    assert fake.updated == [("abs-1", {"isActive": True})]
+
+
+def test_stale_enable_job_converges_to_latest_disabled_portal_state():
+    engine = create_engine("sqlite:///:memory:")
+    SQLModel.metadata.create_all(engine)
+    fake = ReactivationClient()
+    with Session(engine) as session:
+        session.add(
+            PortalUser(
+                id="portal-1",
+                username="reader",
+                password_hash="hash",
+                abs_user_id="abs-1",
+                abs_username="reader",
+                status="disabled",
+            )
+        )
+        session.add(
+            ReconciliationJob(
+                operation="set_active",
+                target_type="portal_user",
+                target_id="portal-1",
+                abs_user_id="abs-1",
+                payload_json='{"isActive":true}',
+                status="pending",
+                next_retry_at=utcnow() - timedelta(seconds=1),
+            )
+        )
+        session.commit()
+
+        result = __import__("asyncio").run(process_reconciliation_jobs(session, fake))
+
+    assert result == {"processed": 1, "succeeded": 1, "failed": 0}
+    assert fake.updated == [("abs-1", {"isActive": False})]

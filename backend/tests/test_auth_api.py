@@ -7,8 +7,74 @@ from sqlmodel import Session, SQLModel, create_engine, select
 from app.db import get_session
 from app.main import app
 from app.models import Code, PortalUser, utcnow
-from app.routers.auth import get_abs_client_factory
+from app.routers.auth import LoginRequest, RegisterRequest, get_abs_client_factory
+from app.routers.me import ChangePasswordRequest
+from app.routers.public import PasswordResetRequest
+from app.routers.admin_users import CreateUserRequest, SetPasswordRequest
 from app.services.codes import redeem_code
+
+
+def test_all_new_password_inputs_cap_at_18_but_login_keeps_legacy_compatibility():
+    assert ChangePasswordRequest(currentPassword="old", newPassword="a" * 18).newPassword == "a" * 18
+    assert PasswordResetRequest(token="t" * 32, newPassword="a" * 18).newPassword == "a" * 18
+    assert CreateUserRequest(username="alice", password="a" * 18).password == "a" * 18
+    assert SetPasswordRequest(password="a" * 18).password == "a" * 18
+    for factory in (
+        lambda: ChangePasswordRequest(currentPassword="old", newPassword="a" * 19),
+        lambda: PasswordResetRequest(token="t" * 32, newPassword="a" * 19),
+        lambda: CreateUserRequest(username="alice", password="a" * 19),
+        lambda: SetPasswordRequest(password="a" * 19),
+    ):
+        try:
+            factory()
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("new passwords longer than 18 characters must be rejected")
+
+    assert LoginRequest(username="alice", password="a" * 19).password == "a" * 19
+
+
+def test_registration_username_maximum_is_18_without_breaking_existing_logins():
+    assert RegisterRequest(
+        username="a" * 18,
+        password="abc",
+        inviteCode="INVITE-CODE",
+    ).username == "a" * 18
+    try:
+        RegisterRequest(
+            username="a" * 19,
+            password="abc",
+            inviteCode="INVITE-CODE",
+        )
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("registration must reject usernames longer than 18 characters")
+
+    # Existing accounts with legacy longer usernames must remain able to log in.
+    assert LoginRequest(username="a" * 19, password="abc").username == "a" * 19
+
+
+def test_registration_password_maximum_is_18_without_breaking_existing_logins():
+    assert RegisterRequest(
+        username="alice",
+        password="a" * 18,
+        inviteCode="INVITE-CODE",
+    ).password == "a" * 18
+    try:
+        RegisterRequest(
+            username="alice",
+            password="a" * 19,
+            inviteCode="INVITE-CODE",
+        )
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("registration must reject passwords longer than 18 characters")
+
+    # Existing accounts may already use passwords longer than the new registration limit.
+    assert LoginRequest(username="alice", password="a" * 19).password == "a" * 19
 
 
 class FakeAbsClient:
@@ -81,12 +147,16 @@ def test_register_with_invite_code_creates_portal_and_abs_user():
         assert fake_abs.created[0]["username"] == "alice"
         assert fake_abs.created[0]["permissions"]["accessAllLibraries"] is True
         assert fake_abs.created[0]["permissions"]["accessExplicitContent"] is True
-        assert fake_abs.created[0]["is_active"] is True
+        assert fake_abs.created[0]["is_active"] is False
 
         with Session(engine) as session:
             saved = session.get(PortalUser, data["user"]["id"])
             assert saved is not None
             assert saved.expires_at is not None
+            assert saved.status == "pending"
+            assert saved.telegram_binding_required is True
+        assert data["user"]["telegramBindingRequired"] is True
+        assert data["user"]["telegramBound"] is False
     finally:
         teardown_client()
 
@@ -213,6 +283,67 @@ def test_login_returns_token_for_portal_user():
         assert response.status_code == 200
         assert "accessToken" not in response.json()
         assert "moyin_session=" in response.headers["set-cookie"]
+    finally:
+        teardown_client()
+
+
+def test_login_allows_pending_user_to_enter_portal_and_bind_telegram():
+    client, engine, _ = make_client()
+    try:
+        from app.security import hash_password
+
+        with Session(engine) as session:
+            session.add(
+                PortalUser(
+                    username="pending_user",
+                    password_hash=hash_password("StrongPassword-521"),
+                    abs_user_id="abs-pending",
+                    abs_username="pending_user",
+                    expires_at=utcnow() + timedelta(days=1),
+                    status="pending",
+                    telegram_binding_required=True,
+                )
+            )
+            session.commit()
+
+        response = client.post(
+            "/api/auth/login",
+            json={"username": "pending_user", "password": "StrongPassword-521"},
+        )
+
+        assert response.status_code == 200
+        assert response.json()["user"]["status"] == "pending"
+        assert response.json()["user"]["telegramBindingRequired"] is True
+    finally:
+        teardown_client()
+
+
+def test_pending_required_binding_does_not_expire_before_activation():
+    client, engine, _ = make_client()
+    try:
+        from app.security import hash_password
+
+        with Session(engine) as session:
+            session.add(
+                PortalUser(
+                    username="delayed_binding",
+                    password_hash=hash_password("StrongPassword-521"),
+                    abs_user_id="abs-delayed",
+                    abs_username="delayed_binding",
+                    expires_at=utcnow() - timedelta(days=1),
+                    status="pending",
+                    telegram_binding_required=True,
+                )
+            )
+            session.commit()
+
+        response = client.post(
+            "/api/auth/login",
+            json={"username": "delayed_binding", "password": "StrongPassword-521"},
+        )
+
+        assert response.status_code == 200
+        assert response.json()["user"]["status"] == "pending"
     finally:
         teardown_client()
 

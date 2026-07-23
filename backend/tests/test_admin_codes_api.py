@@ -4,7 +4,7 @@ from sqlmodel import Session, SQLModel, create_engine, select
 
 from app.db import get_session
 from app.main import app
-from app.models import Code, PortalUser
+from app.models import Code, CodeRedemption, PortalUser
 from app.security import create_access_token, hash_password
 
 
@@ -137,5 +137,34 @@ def test_admin_can_delete_code_and_its_redemptions():
 
         with Session(engine) as session:
             assert session.get(Code, code_id) is None
+    finally:
+        teardown_client()
+
+
+def test_admin_cannot_delete_a_redeemed_code_history():
+    client, engine = make_client()
+    try:
+        with Session(engine) as session:
+            code = Code(code="USED-CODE-0001", type="renew", duration_days=30, used_count=1)
+            session.add(code)
+            session.commit()
+            session.refresh(code)
+            session.add(
+                CodeRedemption(
+                    code_id=code.id,
+                    username_snapshot="listener",
+                    action="renew",
+                )
+            )
+            session.commit()
+            code_id = code.id
+
+        response = client.delete(f"/api/admin/codes/{code_id}", headers=admin_headers())
+        assert response.status_code == 409
+        with Session(engine) as session:
+            assert session.get(Code, code_id) is not None
+            assert session.exec(
+                select(CodeRedemption).where(CodeRedemption.code_id == code_id)
+            ).one()
     finally:
         teardown_client()

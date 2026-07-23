@@ -50,10 +50,12 @@ export default function LoginPage() {
           <p className="kicker mt-8 lg:mt-0">账号登录</p>
           <h2 className="display-md mt-3">登录 {siteName}</h2>
           <p className="lede mt-3 text-sm">输入账号和密码，进入个人中心。</p>
+          <div className="mt-5"><StatusNote tone="warning">新注册账号需要在账号中心绑定 Telegram Bot 后才会启用；已有账号继续按原方式使用。</StatusNote></div>
           {message && <div className="mt-5"><StatusNote tone="danger">{message}</StatusNote>{supportUrl && <a href={supportUrl} target="_blank" rel="noreferrer" className="mt-3 inline-flex items-center gap-1.5 text-sm font-black text-[var(--primary)] underline underline-offset-4"><LifeBuoy size={14} /> 登录遇到问题？联系管理员</a>}</div>}
           <label className="mt-7 block"><span className="mb-2 flex items-center gap-2 text-sm font-black"><User size={15} /> 用户名</span><input className="field" autoComplete="username" placeholder="输入用户名" value={username} onChange={(e) => setUsername(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') void submit(); }} /></label>
           <label className="mt-4 block"><span className="mb-2 flex items-center gap-2 text-sm font-black"><Lock size={15} /> 密码</span><input className="field" autoComplete="current-password" type="password" placeholder="输入密码" value={password} onChange={(e) => setPassword(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') void submit(); }} /></label>
-          <Button variant="primary" className="mt-6 w-full" loading={loading} loadingText="正在验证" onClick={submit}>进入账号中心 <ArrowRight size={17} /></Button>
+          <div className="mt-3 flex justify-end"><Link className="text-sm font-black text-[var(--primary)] underline underline-offset-4" href="/reset-password">忘记密码</Link></div>
+          <Button variant="primary" className="mt-4 w-full" loading={loading} loadingText="正在验证" onClick={submit}>进入账号中心 <ArrowRight size={17} /></Button>
           <p className="mt-6 text-center text-sm text-[var(--muted-foreground)]">还没有账号？ <Link className="font-black text-[var(--primary)] underline underline-offset-4" href="/register">申请访问</Link></p>
           <div className="mt-4 flex items-center justify-center gap-2 text-xs text-[var(--muted-foreground)]"><KeyRound size={13} /> 管理员请前往 <Link href="/admin" className="text-[var(--primary)] underline underline-offset-2">管理台</Link></div>
         </div>

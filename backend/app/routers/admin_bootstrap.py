@@ -17,8 +17,8 @@ router = APIRouter(prefix="/api/admin", tags=["admin"])
 
 
 class BootstrapAdminRequest(BaseModel):
-    username: str = Field(min_length=3, max_length=64, pattern=r"^[a-zA-Z0-9_.-]+$")
-    password: str = Field(min_length=8, max_length=256)
+    username: str = Field(min_length=3, max_length=18, pattern=r"^[a-zA-Z0-9_.-]+$")
+    password: str = Field(min_length=6, max_length=18)
 
 
 def _existing_admin(session: Session) -> PortalUser | None:

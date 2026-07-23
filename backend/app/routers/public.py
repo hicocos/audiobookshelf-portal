@@ -1,6 +1,7 @@
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request
+from pydantic import BaseModel, Field
 from sqlalchemy import text
 from sqlmodel import Session
 
@@ -10,8 +11,22 @@ from app.db import get_session
 from app.observability import set_dependency_ready
 from app.routers.auth import get_abs_client_factory
 from app.services.settings import get_public_settings
+from app.services.password_reset import (
+    PasswordResetError,
+    get_valid_reset,
+    reset_password,
+)
 
 router = APIRouter()
+
+
+class PasswordResetRequest(BaseModel):
+    token: str = Field(min_length=32, max_length=256)
+    newPassword: str = Field(min_length=1, max_length=18)
+
+
+class PasswordResetValidationRequest(BaseModel):
+    token: str = Field(min_length=32, max_length=256)
 
 
 @router.get("/health")
@@ -57,6 +72,43 @@ def public_config(session: Session = Depends(get_session)) -> dict[str, Any]:
     public_settings["registrationEnabled"] = public_settings["features"]["registration"]
     public_settings["passwordMinLength"] = max(1, int(settings.portal_password_min_length))
     return public_settings
+
+
+@router.post("/password-reset/validate")
+def validate_password_reset(
+    payload: PasswordResetValidationRequest,
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    try:
+        reset_token, user = get_valid_reset(session, payload.token)
+    except PasswordResetError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {
+        "valid": True,
+        "username": user.username,
+        "expiresAt": reset_token.expires_at.isoformat(),
+        "passwordMinLength": max(1, int(Settings().portal_password_min_length)),
+    }
+
+
+@router.post("/password-reset")
+async def consume_password_reset(
+    payload: PasswordResetRequest,
+    session: Session = Depends(get_session),
+    abs_factory: Any = Depends(get_abs_client_factory),
+) -> dict[str, Any]:
+    try:
+        user = await reset_password(
+            session,
+            raw_token=payload.token,
+            new_password=payload.newPassword,
+            abs_factory=abs_factory,
+        )
+    except PasswordResetError as exc:
+        detail = str(exc)
+        status = 502 if detail.startswith("media server unavailable") else 400
+        raise HTTPException(status_code=status, detail=detail) from exc
+    return {"ok": True, "username": user.username}
 
 
 @router.get("/session-status")

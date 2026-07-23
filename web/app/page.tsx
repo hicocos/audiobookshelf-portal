@@ -4,7 +4,7 @@ import Link from 'next/link';
 import { ArrowUpRight, CalendarClock, Headphones, Library, ShieldCheck, Sparkles, TicketCheck, Waves } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { AnnouncementBanner, Panel, ShellBackdrop, WordMark } from '@/components/ui';
-import { api, PublicSettings } from '@/lib/api';
+import { api, DEFAULT_TELEGRAM_SETTINGS, PublicSettings } from '@/lib/api';
 
 const fallback: PublicSettings = {
   siteName: 'MoYin.CC', tagline: '安静的声音栖地', registrationEnabled: true, passwordMinLength: 3,
@@ -14,6 +14,7 @@ const fallback: PublicSettings = {
   announcement: { title: '', body: '', linkUrl: '', linkLabel: '', timeline: [] },
   features: { registration: true, showLibraryEntry: false, showSupportEntry: false, showAnnouncements: true },
   operations: { inactivityAutoDisable: false, inactiveDays: 30, newUserGraceDays: 7, lastInactivityCheckAt: null, lastInactivityDisabled: 0 },
+  telegram: { ...DEFAULT_TELEGRAM_SETTINGS },
   sections: {
     benefits: [
       { title: '声音内容库', body: '小说、播客、课程和收藏内容集中在一个入口里，随时打开，继续收听。' },
@@ -95,6 +96,10 @@ export default function HomePage() {
           <Panel className="portal-steps-card portal-card-glow p-6"><h2 className="text-2xl font-black">进入方式</h2><div className="mt-5 grid gap-3">{steps.map((step, i) => <div key={step} className="flex items-center gap-3 rounded-2xl bg-white/5 p-3"><span className="grid size-9 place-items-center rounded-xl bg-[var(--primary)] text-sm font-black text-[var(--primary-foreground)]">{String(i + 1).padStart(2, '0')}</span><p className="font-bold">{step}</p></div>)}</div></Panel>
           <Panel className="portal-faq-card portal-card-glow p-6"><h2 className="text-2xl font-black">常见问题</h2><div className="mt-5 grid gap-3">{faq.map((item) => <article key={item.q} className="rounded-2xl bg-white/5 p-4"><h3 className="font-black">{item.q}</h3><p className="lede mt-2 text-sm">{item.a}</p></article>)}</div></Panel>
         </section>
+        <footer className="flex flex-wrap items-center justify-between gap-3 border-t border-white/10 py-6 text-xs text-[var(--muted-foreground)]">
+          <p>使用服务即表示你了解本站的数据处理与账号规则。</p>
+          <div className="flex gap-4"><Link href="/privacy" className="underline underline-offset-4">隐私说明</Link><Link href="/terms" className="underline underline-offset-4">服务条款</Link></div>
+        </footer>
       </div>
     </ShellBackdrop>
   );

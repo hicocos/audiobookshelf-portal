@@ -1,3 +1,4 @@
+import json
 from datetime import datetime
 from typing import Any, Literal
 
@@ -7,7 +8,7 @@ from sqlmodel import Session, select
 
 from app.auth_deps import require_admin
 from app.db import get_session
-from app.models import Code, CodeRedemption
+from app.models import AuditLog, Code, CodeRedemption
 from app.services.codes import generate_code
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
@@ -59,9 +60,30 @@ def create_codes(
             designated_username=payload.designatedUsername,
             note=payload.note,
             created_by=str(claims.get("sub") or "admin"),
+            commit=False,
         )
         for _ in range(payload.count)
     ]
+    session.add(
+        AuditLog(
+            actor_user_id=str(claims.get("sub") or "") or None,
+            actor_username=str(claims.get("username") or "admin"),
+            action="admin.codes.create_batch",
+            target_type="code_batch",
+            detail_json=json.dumps(
+                {
+                    "type": payload.type,
+                    "durationDays": payload.durationDays,
+                    "count": len(codes),
+                    "codeIds": [code.id for code in codes],
+                },
+                ensure_ascii=False,
+            ),
+        )
+    )
+    session.commit()
+    for code in codes:
+        session.refresh(code)
     return {"codes": [serialize_code(code) for code in codes]}
 
 
@@ -79,7 +101,7 @@ def update_code_status(
     code_id: str,
     payload: UpdateCodeStatusRequest,
     session: Session = Depends(get_session),
-    _claims: dict[str, Any] = Depends(require_admin),
+    claims: dict[str, Any] = Depends(require_admin),
 ) -> dict[str, Any]:
     code = session.get(Code, code_id)
     if code is None:
@@ -88,23 +110,43 @@ def update_code_status(
         raise HTTPException(status_code=400, detail="Code has no remaining uses")
     code.status = payload.status
     session.add(code)
+    session.add(
+        AuditLog(
+            actor_user_id=str(claims.get("sub") or "") or None,
+            actor_username=str(claims.get("username") or "admin"),
+            action=f"admin.code.{payload.status}",
+            target_type="code",
+            target_id=code.id,
+        )
+    )
     session.commit()
     session.refresh(code)
     return {"code": serialize_code(code)}
+
 
 @router.delete("/codes/{code_id}")
 def delete_code(
     code_id: str,
     session: Session = Depends(get_session),
-    _claims: dict[str, Any] = Depends(require_admin),
+    claims: dict[str, Any] = Depends(require_admin),
 ) -> dict[str, Any]:
     code = session.get(Code, code_id)
     if code is None:
         raise HTTPException(status_code=404, detail="Code not found")
-    redemptions = session.exec(select(CodeRedemption).where(CodeRedemption.code_id == code_id)).all()
-    for redemption in redemptions:
-        session.delete(redemption)
+    redemption = session.exec(
+        select(CodeRedemption).where(CodeRedemption.code_id == code_id)
+    ).first()
+    if redemption is not None:
+        raise HTTPException(status_code=409, detail="已使用卡密只能停用，不能删除核销历史。")
     session.delete(code)
+    session.add(
+        AuditLog(
+            actor_user_id=str(claims.get("sub") or "") or None,
+            actor_username=str(claims.get("username") or "admin"),
+            action="admin.code.delete_unused",
+            target_type="code",
+            target_id=code.id,
+        )
+    )
     session.commit()
     return {"ok": True, "id": code_id}
-

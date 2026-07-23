@@ -1,6 +1,6 @@
 'use client';
 
-import { Lock, ScrollText, ShieldCheck, SlidersHorizontal, User } from 'lucide-react';
+import { Bot, Lock, ScrollText, ShieldCheck, User } from 'lucide-react';
 import { useRouter } from 'next/navigation';
 import { useEffect, useState } from 'react';
 import { Button, LoadingScreen, Sheet, ShellBackdrop, StatusNote, WordMark } from '@/components/ui';
@@ -8,7 +8,7 @@ import { api, clearSession, PublicSettings } from '@/lib/api';
 
 export default function AdminLoginPage() {
   const router = useRouter();
-  const [adminUser, setAdminUser] = useState('admin');
+  const [adminUser, setAdminUser] = useState('');
   const [adminPass, setAdminPass] = useState('');
   const [siteName, setSiteName] = useState('MoYin.CC');
   const [message, setMessage] = useState('');
@@ -47,7 +47,7 @@ export default function AdminLoginPage() {
 
   const features = [
     { icon: <ShieldCheck size={17} />, title: '后台独立鉴权', body: '仅管理员可进入配置页，操作可确认、可回退。' },
-    { icon: <SlidersHorizontal size={17} />, title: '自动化巡检', body: '无收听记录禁用策略可视化管理。' },
+    { icon: <Bot size={17} />, title: 'Web 与 Bot 分工', body: 'Web 管账号和卡密，Bot 处理移动端状态与工单。' },
     { icon: <ScrollText size={17} />, title: '前台文案统一', body: '首页文案、教程步骤与客服入口集中维护。' },
   ];
 
@@ -61,7 +61,7 @@ export default function AdminLoginPage() {
             <p className="kicker !text-[var(--primary)]">运营管理</p>
             <h1 className="display-md mt-4 max-w-md text-[var(--foreground)]">清晰、可靠的运营管理台</h1>
             <p className="mt-5 max-w-sm leading-7 text-[var(--muted-foreground)]">
-              集中管理卡密、用户活跃度、巡检策略和前台文案。重要操作均需确认，降低误操作风险。
+              集中管理账号、卡密、批量补偿、站点配置与 Bot 开关，危险操作均需确认。
             </p>
           </div>
           <div className="space-y-3">
@@ -89,7 +89,7 @@ export default function AdminLoginPage() {
 
           <label className="mt-7 block">
             <span className="mb-2 flex items-center gap-2 text-sm font-semibold text-[var(--muted-foreground)]"><User size={15} /> 管理员用户名</span>
-            <input className="field" value={adminUser} onChange={(e) => setAdminUser(e.target.value)} placeholder="admin" disabled={loading} />
+            <input className="field" value={adminUser} onChange={(e) => setAdminUser(e.target.value)} placeholder="输入管理员用户名" autoComplete="username" disabled={loading} />
           </label>
           <label className="mt-4 block">
             <span className="mb-2 flex items-center gap-2 text-sm font-semibold text-[var(--muted-foreground)]"><Lock size={15} /> 管理员密码</span>

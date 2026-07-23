@@ -54,14 +54,7 @@ def teardown_client():
 
 
 def seed_admin(session: Session, *, user_id: str = "admin-id") -> PortalUser:
-    admin = PortalUser(
-        id=user_id,
-        username="admin" if user_id == "admin-id" else user_id,
-        password_hash=hash_password("StrongPassword-521"),
-        role="admin",
-        status="active",
-        abs_username="admin" if user_id == "admin-id" else user_id,
-    )
+    admin = PortalUser(id=user_id, username="admin" if user_id == "admin-id" else user_id, password_hash=hash_password("StrongPassword-521"), role="admin", status="active", abs_username="admin" if user_id == "admin-id" else user_id)
     session.add(admin)
     session.commit()
     session.refresh(admin)
@@ -89,13 +82,11 @@ def test_admin_list_library_items_clamps_limit():
     fake = FakeAbsClient(items=[{"id": "it1", "media": {"metadata": {"title": "测试作品"}}}])
     client = make_client(fake)
     try:
-        resp = client.get(
-            "/api/library/admin/libraries/lib1/items?limit=9999", headers=admin_headers()
-        )
+        resp = client.get("/api/library/admin/libraries/lib1/items?limit=9999", headers=admin_headers())
         assert resp.status_code == 200
         data = resp.json()
         assert data["count"] == 1
-        assert data["limit"] == 200  # clamped
+        assert data["limit"] == 200
         assert fake.requested_limits == [200]
         assert data["items"][0]["title"] == "测试作品"
     finally:

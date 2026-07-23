@@ -37,7 +37,7 @@ RECONCILIATION_BACKLOG = Gauge(
 )
 WORKER_LAG = Gauge(
     "moyin_worker_lag_seconds",
-    "Seconds since the worker last completed successfully; NaN before first success.",
+    "Seconds since the built-in scheduler last completed; NaN before first success.",
 )
 BUILD_INFO = Gauge(
     "moyin_build_info",

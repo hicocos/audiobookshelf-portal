@@ -65,3 +65,19 @@ def test_legacy_settings_without_announcement_are_backfilled():
     # deep_merge against DEFAULT must inject the announcement shape.
     assert "announcement" in stored
     assert stored["announcement"]["title"] == ""
+
+
+def test_unknown_legacy_fields_are_removed_when_settings_are_read_and_saved():
+    with _session() as session:
+        update_public_settings(
+            session,
+            {"features": {"renewal": True}, "legacyTopLevel": "discard-me"},
+        )
+        stored = get_public_settings(session)
+        assert "renewal" not in stored["features"]
+        assert "legacyTopLevel" not in stored
+
+        update_public_settings(session, {"siteName": "Updated"})
+        persisted = get_public_settings(session)
+        assert "renewal" not in persisted["features"]
+        assert "legacyTopLevel" not in persisted

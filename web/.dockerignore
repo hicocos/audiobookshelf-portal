@@ -3,3 +3,12 @@ node_modules
 npm-debug.log
 .env.local
 .env
+e2e
+test
+*.test.ts
+*.test.tsx
+playwright.config.ts
+vitest.config.ts
+playwright-report
+test-results
+coverage

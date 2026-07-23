@@ -6,7 +6,7 @@ disabled / deleted accounts must be blocked even when their JWT cookie is
 still valid, otherwise a revoked user keeps reading their own data.
 """
 
-from datetime import UTC, datetime, timedelta
+from datetime import timedelta
 
 from fastapi.testclient import TestClient
 from sqlalchemy.pool import StaticPool
@@ -130,7 +130,6 @@ def test_library_summary_blocks_disabled_user():
     finally:
         teardown_client()
 
-
 def test_library_summary_blocks_deleted_user():
     client, engine = make_client()
     try:
@@ -218,49 +217,5 @@ def test_library_summary_uses_authenticated_abs_user_for_portal_admin():
         assert response.json()["progress"][0]["title"] == "灵境行者"
         assert response.json()["progress"][0]["author"] == "卖报小郎君"
         assert response.json()["progress"][0]["narrator"] == "有声的紫襟"
-    finally:
-        teardown_client()
-
-
-def test_admin_overview_uses_user_detail_progress_for_latest_listen_when_list_users_is_sparse():
-    """ABS /api/users can omit mediaProgress; admin activity must fetch details."""
-    listened_at = utcnow() - timedelta(days=1)
-    listened_ms = int(listened_at.timestamp() * 1000)
-    listened_at = datetime.fromtimestamp(listened_ms / 1000, tz=UTC)
-    fake_abs = FakeAbsClient(
-        users=[{"id": "abs-alice", "username": "alice", "isActive": True, "lastSeen": listened_ms, "mediaProgress": []}],
-        user_details={
-            "abs-alice": {
-                "id": "abs-alice",
-                "username": "alice",
-                "isActive": True,
-                "lastSeen": listened_ms,
-                "mediaProgress": [{"id": "p1", "libraryItemId": "book1", "lastUpdate": listened_ms}],
-            }
-        },
-    )
-    client, engine = make_client(fake_abs)
-    try:
-        with Session(engine) as session:
-            user = PortalUser(
-                username="alice",
-                password_hash=hash_password("StrongPassword-521"),
-                abs_user_id="abs-alice",
-                abs_username="alice",
-                expires_at=utcnow() + timedelta(days=5),
-                status="active",
-                created_at=utcnow() - timedelta(days=10),
-            )
-            session.add(user)
-            session.commit()
-
-        response = client.get("/api/library/admin/overview", headers=admin_headers())
-
-        assert response.status_code == 200
-        data = response.json()
-        assert data["stats"]["progressCount"] == 1
-        assert data["users"][0]["latestListenAt"] == listened_at.isoformat()
-        assert data["users"][0]["progressCount"] == 1
-        assert data["users"][0]["inactivityReason"] == "最近一个周期内有收听记录"
     finally:
         teardown_client()

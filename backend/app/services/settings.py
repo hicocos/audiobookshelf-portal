@@ -1,12 +1,18 @@
 import json
+from hashlib import sha256
 from copy import deepcopy
 from typing import Any
 
 from sqlmodel import Session
 
-from app.models import AppSetting, utcnow
+from app.models import AppSetting, AuditLog, utcnow
 
 PUBLIC_SETTINGS_KEY = "public_settings"
+
+
+def settings_revision(settings: dict[str, Any]) -> str:
+    canonical = json.dumps(settings, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return sha256(canonical.encode("utf-8")).hexdigest()
 
 DEFAULT_PUBLIC_SETTINGS: dict[str, Any] = {
     "siteName": "MoYin.CC",
@@ -50,6 +56,34 @@ DEFAULT_PUBLIC_SETTINGS: dict[str, Any] = {
         "lastInactivityCheckAt": None,
         "lastInactivityDisabled": 0,
     },
+    "telegram": {
+        "renewalEnabled": True,
+        "passwordResetEnabled": True,
+        "recentListeningEnabled": True,
+        "announcementsEnabled": True,
+        "lifecycleNotificationsEnabled": True,
+        "adminEnabled": True,
+        "groupMembershipEnabled": False,
+        "requiredGroupId": "",
+        "requiredGroupInviteUrl": "",
+        "groupGraceHours": 72,
+        "requestsEnabled": True,
+        "checkinEnabled": True,
+        "pointsRedemptionEnabled": True,
+        "referralEnabled": True,
+        "leaderboardEnabled": False,
+        "checkinBasePoints": 10,
+        "checkinStreakBonusEvery": 7,
+        "checkinStreakBonusPoints": 20,
+        "pointsPerDay": 100,
+        "maxRedeemDays": 30,
+        "referralRewardPoints": 50,
+        "referralInviteValidDays": 7,
+        "referralAccountDays": 30,
+        "referralMonthlyLimit": 3,
+        "leaderboardLimit": 10,
+        "expiryReminderDays": [7, 3, 1, 0],
+    },
     "sections": {
         "benefits": [
             {"title": "声音内容库", "body": "把小说、播客、课程和收藏内容集中在一个干净入口里，随时打开，继续收听。"},
@@ -81,6 +115,21 @@ def deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]
     return result
 
 
+def clean_settings(
+    value: dict[str, Any], schema: dict[str, Any] = DEFAULT_PUBLIC_SETTINGS
+) -> dict[str, Any]:
+    cleaned: dict[str, Any] = {}
+    for key, default in schema.items():
+        if key not in value:
+            continue
+        candidate = value[key]
+        if isinstance(default, dict) and isinstance(candidate, dict):
+            cleaned[key] = clean_settings(candidate, default)
+        else:
+            cleaned[key] = candidate
+    return cleaned
+
+
 def get_public_settings(session: Session | None = None) -> dict[str, Any]:
     if session is None:
         return deepcopy(DEFAULT_PUBLIC_SETTINGS)
@@ -91,12 +140,21 @@ def get_public_settings(session: Session | None = None) -> dict[str, Any]:
         stored = json.loads(setting.value_json)
     except json.JSONDecodeError:
         stored = {}
-    return deep_merge(DEFAULT_PUBLIC_SETTINGS, stored)
+    merged = deep_merge(DEFAULT_PUBLIC_SETTINGS, clean_settings(stored))
+    telegram = merged.get("telegram")
+    if isinstance(telegram, dict):
+        telegram.pop("inactivityWarningDays", None)
+    return merged
 
 
-def update_public_settings(session: Session, patch: dict[str, Any]) -> dict[str, Any]:
+def update_public_settings(
+    session: Session,
+    patch: dict[str, Any],
+    *,
+    audit_log: AuditLog | None = None,
+) -> dict[str, Any]:
     current = get_public_settings(session)
-    updated = deep_merge(current, patch)
+    updated = deep_merge(current, clean_settings(patch))
     setting = session.get(AppSetting, PUBLIC_SETTINGS_KEY)
     payload = json.dumps(updated, ensure_ascii=False)
     if setting:
@@ -105,5 +163,7 @@ def update_public_settings(session: Session, patch: dict[str, Any]) -> dict[str,
     else:
         setting = AppSetting(key=PUBLIC_SETTINGS_KEY, value_json=payload)
         session.add(setting)
+    if audit_log is not None:
+        session.add(audit_log)
     session.commit()
     return updated

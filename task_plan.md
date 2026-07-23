@@ -1,6 +1,6 @@
 # ABS Portal 审查计划
 
-目标：审查自写 audiobookshelf-portal（moyin-api/moyin-web/moyin-worker）的前端、后端、业务逻辑、安全漏洞与优化建议。
+目标：审查自写 audiobookshelf-portal（moyin-api/moyin-web/moyin-bot）的前端、后端、业务逻辑、安全漏洞与优化建议。
 
 ## 阶段
 
@@ -14,5 +14,5 @@
 ## 范围
 
 - 项目目录：`/root/audiobookshelf-portal`
-- 容器：`moyin-api`, `moyin-web`, `moyin-worker`
+- Portal 容器：`moyin-api`（含调度器）, `moyin-web`, `moyin-bot`
 - 官方 ABS 容器 `audiobookshelf` 不作为主要审查对象，只审查 portal 与 ABS 集成逻辑。

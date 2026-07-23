@@ -43,7 +43,7 @@ export function Panel({ children, className = '' }: { children: ReactNode; class
 
 export function LoadingScreen({ title = '正在进入', subtitle = 'loading' }: { title?: string; subtitle?: string }) {
   return (
-    <div className="fixed inset-0 z-50 grid place-items-center bg-[rgba(3,20,42,.78)] backdrop-blur-md">
+    <div className="fixed inset-0 z-50 grid place-items-center bg-[rgba(3,20,42,.78)] backdrop-blur-md" role="status" aria-live="polite" aria-busy="true">
       <div className="anime-panel w-[min(320px,calc(100vw-2rem))] p-8 text-center">
         <span className="mx-auto grid size-12 place-items-center rounded-2xl bg-[rgba(0,190,227,.14)] text-[var(--primary)]">
           <Loader2 size={24} className="animate-spin" />
@@ -73,7 +73,7 @@ export function Button({ children, loading, loadingText, variant = 'primary', cl
 export const ActionButton = Button;
 
 export function StatusNote({ children, tone = 'neutral' }: { children: ReactNode; tone?: 'neutral' | 'success' | 'warning' | 'danger' }) {
-  return <p className={`note note-${tone}`}>{children}</p>;
+  return <p className={`note note-${tone}`} role={tone === 'danger' ? 'alert' : 'status'} aria-live={tone === 'danger' ? 'assertive' : 'polite'}>{children}</p>;
 }
 
 export function PromptModal({ title, body, onClose, confirmText = '我知道了' }: { title: string; body: ReactNode; onClose: () => void; confirmText?: string }) {

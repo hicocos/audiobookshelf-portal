@@ -88,6 +88,49 @@ class OperationsPatch(StrictPatchModel):
     lastInactivityDisabled: int | None = Field(default=None, ge=0, le=1_000_000)
 
 
+class TelegramPatch(StrictPatchModel):
+    renewalEnabled: bool | None = None
+    passwordResetEnabled: bool | None = None
+    recentListeningEnabled: bool | None = None
+    announcementsEnabled: bool | None = None
+    lifecycleNotificationsEnabled: bool | None = None
+    adminEnabled: bool | None = None
+    groupMembershipEnabled: bool | None = None
+    requiredGroupId: Annotated[str, StringConstraints(max_length=128)] | None = None
+    requiredGroupInviteUrl: str | None = None
+    groupGraceHours: int | None = Field(default=None, ge=1, le=720)
+    requestsEnabled: bool | None = None
+    checkinEnabled: bool | None = None
+    pointsRedemptionEnabled: bool | None = None
+    referralEnabled: bool | None = None
+    leaderboardEnabled: bool | None = None
+    checkinBasePoints: int | None = Field(default=None, ge=1, le=10000)
+    checkinStreakBonusEvery: int | None = Field(default=None, ge=1, le=365)
+    checkinStreakBonusPoints: int | None = Field(default=None, ge=0, le=10000)
+    pointsPerDay: int | None = Field(default=None, ge=1, le=1_000_000)
+    maxRedeemDays: int | None = Field(default=None, ge=1, le=365)
+    referralRewardPoints: int | None = Field(default=None, ge=0, le=1_000_000)
+    referralInviteValidDays: int | None = Field(default=None, ge=1, le=365)
+    referralAccountDays: int | None = Field(default=None, ge=1, le=3650)
+    referralMonthlyLimit: int | None = Field(default=None, ge=1, le=100)
+    leaderboardLimit: int | None = Field(default=None, ge=3, le=50)
+    expiryReminderDays: list[int] | None = Field(default=None, max_length=10)
+
+    @field_validator("expiryReminderDays")
+    @classmethod
+    def validate_reminder_days(cls, value: list[int] | None) -> list[int] | None:
+        if value is None:
+            return None
+        if any(day < 0 or day > 365 for day in value):
+            raise ValueError("expiry reminder days must be between 0 and 365")
+        return sorted(set(value), reverse=True)
+
+    @field_validator("requiredGroupInviteUrl")
+    @classmethod
+    def validate_group_url(cls, value: str | None) -> str | None:
+        return None if value is None else _validate_https_or_relative(value)
+
+
 class BenefitItem(StrictPatchModel):
     title: Annotated[str, StringConstraints(min_length=1, max_length=200)]
     body: Annotated[str, StringConstraints(min_length=1, max_length=1000)]
@@ -113,4 +156,5 @@ class PublicSettingsPatch(StrictPatchModel):
     announcement: AnnouncementPatch | None = None
     features: FeaturesPatch | None = None
     operations: OperationsPatch | None = None
+    telegram: TelegramPatch | None = None
     sections: SectionsPatch | None = None

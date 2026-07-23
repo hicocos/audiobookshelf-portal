@@ -29,6 +29,8 @@ async def disable_upstream_if_expired(user: PortalUser, session: Session, abs_fa
     """
     if user.role in {"admin", "root"}:
         return False
+    if user.status == "pending" and user.telegram_binding_required and not user.telegram_id:
+        return False
     expires_at = _aware(user.expires_at)
     if expires_at is None or expires_at > utcnow():
         return False

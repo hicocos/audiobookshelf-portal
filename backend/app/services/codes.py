@@ -27,6 +27,7 @@ def generate_code(
     expires_at: datetime | None = None,
     designated_username: str | None = None,
     note: str | None = None,
+    commit: bool = True,
 ) -> Code:
     for _ in range(10):
         value = _new_code()
@@ -43,8 +44,11 @@ def generate_code(
                 note=note,
             )
             session.add(code)
-            session.commit()
-            session.refresh(code)
+            if commit:
+                session.commit()
+                session.refresh(code)
+            else:
+                session.flush()
             return code
     raise RuntimeError("Failed to generate unique code")
 
@@ -87,7 +91,15 @@ def validate_code(session: Session, code_value: str, *, username: str | None = N
     return code
 
 
-def redeem_code(session: Session, code_value: str, *, username: str, action: str, commit: bool = True) -> Code:
+def redeem_code(
+    session: Session,
+    code_value: str,
+    *,
+    username: str,
+    action: str,
+    commit: bool = True,
+    portal_user_id: str | None = None,
+) -> Code:
     code = validate_code(session, code_value, username=username, action=action)
 
     result = session.exec(
@@ -104,6 +116,7 @@ def redeem_code(session: Session, code_value: str, *, username: str, action: str
     session.refresh(code)
     redemption = CodeRedemption(
         code_id=code.id,
+        portal_user_id=portal_user_id,
         username_snapshot=username,
         action=action,
     )

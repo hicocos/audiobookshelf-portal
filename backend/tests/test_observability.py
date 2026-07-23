@@ -1,3 +1,5 @@
+import json
+import logging
 import re
 from secrets import token_hex
 
@@ -6,7 +8,7 @@ from sqlalchemy.pool import StaticPool
 from sqlmodel import Session, SQLModel, create_engine
 
 from app.db import get_session
-from app.logging_config import request_id_context
+from app.logging_config import JsonFormatter, request_id_context
 from app.main import app
 from app.models import ReconciliationJob
 
@@ -56,6 +58,20 @@ def test_request_id_is_preserved_or_generated_and_returned() -> None:
 
     assert supplied.headers["X-Request-ID"] == "edge-123"
     assert re.fullmatch(r"[0-9a-f]{32}", generated.headers["X-Request-ID"])
+
+
+def test_api_log_timestamps_use_shanghai_timezone() -> None:
+    record = logging.LogRecord(
+        name="test.api",
+        level=logging.INFO,
+        pathname=__file__,
+        lineno=1,
+        msg="handled",
+        args=(),
+        exc_info=None,
+    )
+    payload = json.loads(JsonFormatter().format(record))
+    assert payload["timestamp"].endswith("+08:00")
 
 
 def test_metrics_reject_anonymous_requests() -> None:

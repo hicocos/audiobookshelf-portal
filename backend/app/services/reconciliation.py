@@ -4,7 +4,7 @@ from typing import Any, Protocol
 
 from sqlmodel import Session, select
 
-from app.models import ReconciliationJob, utcnow
+from app.models import PortalUser, ReconciliationJob, utcnow
 
 
 class AbsReconciliationClient(Protocol):
@@ -48,12 +48,35 @@ def enqueue_reconciliation_job(
     return job
 
 
-async def _apply_job(job: ReconciliationJob, abs_client: AbsReconciliationClient) -> None:
+def _current_portal_active_state(session: Session, job: ReconciliationJob) -> bool | None:
+    """Resolve the current desired state instead of replaying a stale command.
+
+    Reconciliation jobs are durable and may be retried after a newer admin, expiry,
+    renewal, or group-membership action. Portal state is the source of truth for
+    portal-user activation, so an old retry must converge ABS to the latest state.
+    """
+
+    if job.target_type != "portal_user":
+        return None
+    user = session.get(PortalUser, job.target_id)
+    if user is None:
+        return False
+    expires_at = _aware(user.expires_at)
+    return user.status == "active" and (expires_at is None or expires_at > utcnow())
+
+
+async def _apply_job(
+    session: Session,
+    job: ReconciliationJob,
+    abs_client: AbsReconciliationClient,
+) -> None:
     payload = json.loads(job.payload_json)
     if job.operation == "set_active":
         if not job.abs_user_id:
             raise ValueError("set_active job requires abs_user_id")
-        await abs_client.update_user(job.abs_user_id, {"isActive": bool(payload["isActive"])})
+        current_state = _current_portal_active_state(session, job)
+        desired_state = bool(payload["isActive"]) if current_state is None else current_state
+        await abs_client.update_user(job.abs_user_id, {"isActive": desired_state})
         return
     if job.operation == "delete_user":
         if not job.abs_user_id:
@@ -87,7 +110,7 @@ async def process_reconciliation_jobs(
     failed = 0
     for job in jobs:
         try:
-            await _apply_job(job, abs_client)
+            await _apply_job(session, job, abs_client)
         except Exception as exc:  # noqa: BLE001 - persist every repair failure
             job.attempts += 1
             job.status = "retry" if job.attempts < 10 else "failed"

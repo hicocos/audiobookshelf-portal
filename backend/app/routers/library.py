@@ -40,7 +40,6 @@ def _public_library(item: dict[str, Any]) -> dict[str, Any]:
         "lastScan": _ms_to_iso(item.get("lastScan")),
     }
 
-
 def _public_item(item: dict[str, Any]) -> dict[str, Any]:
     media = item.get("media") if isinstance(item.get("media"), dict) else {}
     metadata = media.get("metadata") if isinstance(media.get("metadata"), dict) else {}
@@ -197,12 +196,9 @@ async def admin_library_overview(
             user_details_by_id: dict[str, dict[str, Any]] = {}
             for item in users:
                 user_id = str(item.get("id") or "")
-                progress = item.get("mediaProgress") if isinstance(item.get("mediaProgress"), list) else None
-                # Audiobookshelf's user list endpoint can either omit mediaProgress
-                # or include an empty placeholder array. Fetch per-user detail while
-                # the ABS client context is still open; doing it after `async with`
-                # closes the httpx client and silently loses listening history.
-                if (progress is None or len(progress) == 0) and user_id:
+                progress = item.get("mediaProgress")
+                progress = progress if isinstance(progress, list) else None
+                if (progress is None or not progress) and user_id:
                     try:
                         user_details_by_id[user_id] = await abs_client.get_user(user_id)
                     except (httpx.HTTPError, TypeError, RuntimeError):
@@ -215,18 +211,19 @@ async def admin_library_overview(
     portal_users = session.exec(select(PortalUser)).all()
     portal_by_abs_id = {str(user.abs_user_id): user for user in portal_users if user.abs_user_id}
     settings = get_public_settings(session)
-    operations = settings.get("operations") if isinstance(settings.get("operations"), dict) else {}
+    operations = settings.get("operations")
+    operations = operations if isinstance(operations, dict) else {}
     inactive_days = int(operations.get("inactiveDays") or 30)
     grace_days = int(operations.get("newUserGraceDays") or 7)
     inactive_candidates = 0
     for item in users:
         user_id = str(item.get("id") or "")
         detail = user_details_by_id.get(user_id, item)
-        progress = item.get("mediaProgress") if isinstance(item.get("mediaProgress"), list) else []
-        detail_progress = detail.get("mediaProgress") if isinstance(detail.get("mediaProgress"), list) else []
-        if detail_progress:
-            progress = detail_progress
+        progress = item.get("mediaProgress")
         progress = progress if isinstance(progress, list) else []
+        detail_progress = detail.get("mediaProgress")
+        if isinstance(detail_progress, list) and detail_progress:
+            progress = detail_progress
         total_progress += len(progress)
         merged_item = {**item, **detail, "mediaProgress": progress}
         portal_user = portal_by_abs_id.get(user_id)
@@ -240,22 +237,25 @@ async def admin_library_overview(
                 inactive_days=inactive_days,
                 new_user_grace_days=grace_days,
             )
-            if should_disable:
-                inactive_candidates += 1
-        public_users.append({
-            "id": merged_item.get("id"),
-            "username": merged_item.get("username"),
-            "type": merged_item.get("type"),
-            "isActive": merged_item.get("isActive"),
-            "lastSeen": _ms_to_iso(merged_item.get("lastSeen")),
-            "latestListenAt": latest.isoformat() if latest else None,
-            "progressCount": len(progress),
-            "portalUserId": portal_user.id if portal_user else None,
-            "portalStatus": portal_user.status if portal_user else None,
-            "portalCreatedAt": portal_user.created_at.isoformat() if portal_user else None,
-            "inactivityCandidate": should_disable,
-            "inactivityReason": inactivity_reason,
-        })
+            inactive_candidates += int(should_disable)
+        public_users.append(
+            {
+                "id": merged_item.get("id"),
+                "username": merged_item.get("username"),
+                "type": merged_item.get("type"),
+                "isActive": merged_item.get("isActive"),
+                "lastSeen": _ms_to_iso(merged_item.get("lastSeen")),
+                "latestListenAt": latest.isoformat() if latest else None,
+                "progressCount": len(progress),
+                "portalUserId": portal_user.id if portal_user else None,
+                "portalStatus": portal_user.status if portal_user else None,
+                "portalCreatedAt": (
+                    portal_user.created_at.isoformat() if portal_user else None
+                ),
+                "inactivityCandidate": should_disable,
+                "inactivityReason": inactivity_reason,
+            }
+        )
     return {
         "libraries": [_public_library(item) for item in libraries],
         "users": public_users,
@@ -275,7 +275,6 @@ async def admin_list_libraries(
     _claims: dict[str, Any] = Depends(require_admin),
     abs_factory: Any = Depends(get_abs_client_factory),
 ) -> dict[str, Any]:
-    """Read-only list of media libraries for the admin browser."""
     try:
         async with abs_factory() as abs_client:
             libraries = await abs_client.list_libraries()
@@ -291,7 +290,6 @@ async def admin_list_library_items(
     _claims: dict[str, Any] = Depends(require_admin),
     abs_factory: Any = Depends(get_abs_client_factory),
 ) -> dict[str, Any]:
-    """Read-only list of items inside one media library (content review only)."""
     safe_limit = max(1, min(int(limit or 50), 200))
     try:
         async with abs_factory() as abs_client:

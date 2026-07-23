@@ -8,11 +8,12 @@ export const DEFAULT_ADMIN_SETTINGS: PublicSettings = {
   announcement: { title: '', body: '', linkUrl: '', linkLabel: '', timeline: [] },
   features: { registration: true, showLibraryEntry: false, showSupportEntry: false, showAnnouncements: true },
   operations: { inactivityAutoDisable: false, inactiveDays: 30, newUserGraceDays: 7, lastInactivityCheckAt: null, lastInactivityDisabled: 0 },
+  telegram: { renewalEnabled: true, passwordResetEnabled: true, recentListeningEnabled: true, announcementsEnabled: true, lifecycleNotificationsEnabled: true, adminEnabled: true, groupMembershipEnabled: false, requiredGroupId: '', requiredGroupInviteUrl: '', groupGraceHours: 72, requestsEnabled: true, checkinEnabled: true, pointsRedemptionEnabled: true, referralEnabled: true, leaderboardEnabled: false, checkinBasePoints: 10, checkinStreakBonusEvery: 7, checkinStreakBonusPoints: 20, pointsPerDay: 100, maxRedeemDays: 30, referralRewardPoints: 50, referralInviteValidDays: 7, referralAccountDays: 30, referralMonthlyLimit: 3, leaderboardLimit: 10, expiryReminderDays: [7, 3, 1, 0] },
   sections: { benefits: [], steps: [], faq: [] },
 };
 
 export type AdminSettingsInput = Partial<Omit<PublicSettings,
-  'copy' | 'links' | 'client' | 'announcement' | 'features' | 'operations' | 'sections'
+  'copy' | 'links' | 'client' | 'announcement' | 'features' | 'operations' | 'telegram' | 'sections'
 >> & {
   copy?: Partial<PublicSettings['copy']>;
   links?: Partial<PublicSettings['links']>;
@@ -20,6 +21,7 @@ export type AdminSettingsInput = Partial<Omit<PublicSettings,
   announcement?: Partial<PublicSettings['announcement']>;
   features?: Partial<PublicSettings['features']>;
   operations?: Partial<PublicSettings['operations']>;
+  telegram?: Partial<PublicSettings['telegram']>;
   sections?: Partial<PublicSettings['sections']>;
 };
 
@@ -48,6 +50,7 @@ export function hydrateAdminSettings(value: AdminSettingsInput = {}): HydratedAd
     announcement: { ...DEFAULT_ADMIN_SETTINGS.announcement, ...value.announcement, timeline },
     features: { ...DEFAULT_ADMIN_SETTINGS.features, ...value.features },
     operations: { ...DEFAULT_ADMIN_SETTINGS.operations, ...value.operations },
+    telegram: { ...DEFAULT_ADMIN_SETTINGS.telegram, ...value.telegram },
     sections: { ...DEFAULT_ADMIN_SETTINGS.sections, ...value.sections, benefits, steps, faq },
   };
 

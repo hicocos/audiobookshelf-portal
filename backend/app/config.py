@@ -24,7 +24,7 @@ class Settings(BaseSettings):
     session_cookie_samesite: str = Field(default="lax", alias="SESSION_COOKIE_SAMESITE")
     registration_enabled: bool = True
     default_valid_days: int = 30
-    portal_password_min_length: int = Field(default=3, alias="PORTAL_PASSWORD_MIN_LENGTH")
+    portal_password_min_length: int = Field(default=6, alias="PORTAL_PASSWORD_MIN_LENGTH")
     next_public_site_name: str = Field(default="MoYin.CC", alias="NEXT_PUBLIC_SITE_NAME")
     cors_allowed_origins: str = Field(
         default="http://localhost:3009,http://127.0.0.1:3009",
@@ -37,6 +37,12 @@ class Settings(BaseSettings):
     telegram_bind_code_max_failures: int = Field(default=5, alias="TELEGRAM_BIND_CODE_MAX_FAILURES")
     telegram_search_scan_limit: int = Field(default=200, alias="TELEGRAM_SEARCH_SCAN_LIMIT")
     telegram_search_result_limit: int = Field(default=8, alias="TELEGRAM_SEARCH_RESULT_LIMIT")
+    telegram_flow_ttl_minutes: int = Field(default=15, alias="TELEGRAM_FLOW_TTL_MINUTES")
+    telegram_password_reset_ttl_minutes: int = Field(
+        default=10,
+        alias="TELEGRAM_PASSWORD_RESET_TTL_MINUTES",
+    )
+    telegram_admin_ids: str = Field(default="", alias="TELEGRAM_ADMIN_IDS")
     trusted_proxy_ips: str = Field(default="127.0.0.1,::1", alias="TRUSTED_PROXY_IPS")
     admin_setup_token: str = Field(default="", alias="ADMIN_SETUP_TOKEN")
     worker_health_state_path: str = Field(
@@ -46,6 +52,17 @@ class Settings(BaseSettings):
     worker_health_max_age_seconds: int = Field(
         default=900,
         alias="WORKER_HEALTH_MAX_AGE_SECONDS",
+    )
+    scheduler_enabled: bool = Field(default=True, alias="SCHEDULER_ENABLED")
+    scheduler_interval_seconds: int = Field(
+        default=300,
+        ge=1,
+        le=86400,
+        alias="SCHEDULER_INTERVAL_SECONDS",
+    )
+    scheduler_lock_path: str = Field(
+        default="/data/scheduler.lock",
+        alias="SCHEDULER_LOCK_PATH",
     )
 
     @model_validator(mode="after")

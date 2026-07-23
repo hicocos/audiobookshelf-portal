@@ -1,7 +1,7 @@
 from datetime import UTC, datetime
 from uuid import uuid4
 
-from sqlalchemy import event
+from sqlalchemy import UniqueConstraint, event
 from sqlmodel import Field, SQLModel
 
 
@@ -30,6 +30,7 @@ class PortalUser(SQLModel, table=True):
     telegram_id: str | None = Field(default=None, index=True)
     telegram_username: str | None = None
     telegram_bound_at: datetime | None = None
+    telegram_binding_required: bool = False
     session_version: int = 0
     password_changed_at: datetime | None = None
     role: str = "user"
@@ -102,6 +103,187 @@ class TelegramBindToken(SQLModel, table=True):
     used_at: datetime | None = None
     failed_attempts: int = 0
     created_at: datetime = Field(default_factory=utcnow)
+
+
+class TelegramFlowSession(SQLModel, table=True):
+    __tablename__ = "telegram_flow_sessions"
+
+    id: str = Field(default_factory=new_id, primary_key=True)
+    telegram_id: str = Field(index=True, unique=True)
+    kind: str = Field(index=True)
+    step: str = Field(index=True)
+    payload_json: str = "{}"
+    expires_at: datetime = Field(index=True)
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
+
+
+class PasswordResetToken(SQLModel, table=True):
+    __tablename__ = "password_reset_tokens"
+
+    id: str = Field(default_factory=new_id, primary_key=True)
+    portal_user_id: str = Field(
+        foreign_key="portal_users.id",
+        ondelete="CASCADE",
+        index=True,
+    )
+    token_hash: str = Field(index=True, unique=True)
+    expires_at: datetime = Field(index=True)
+    used_at: datetime | None = None
+    created_at: datetime = Field(default_factory=utcnow)
+
+
+class TelegramNotification(SQLModel, table=True):
+    __tablename__ = "telegram_notifications"
+
+    id: str = Field(default_factory=new_id, primary_key=True)
+    dedupe_key: str = Field(index=True, unique=True)
+    telegram_id: str = Field(index=True)
+    kind: str = Field(index=True)
+    message: str
+    status: str = Field(default="pending", index=True)
+    attempts: int = 0
+    next_attempt_at: datetime = Field(default_factory=utcnow, index=True)
+    claimed_at: datetime | None = None
+    sent_at: datetime | None = None
+    last_error: str | None = None
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
+
+
+class TelegramGroupMembership(SQLModel, table=True):
+    __tablename__ = "telegram_group_memberships"
+
+    id: str = Field(default_factory=new_id, primary_key=True)
+    portal_user_id: str = Field(
+        foreign_key="portal_users.id",
+        ondelete="CASCADE",
+        index=True,
+        unique=True,
+    )
+    telegram_id: str = Field(index=True)
+    group_id: str = Field(index=True)
+    status: str = Field(default="member", index=True)
+    left_at: datetime | None = None
+    grace_expires_at: datetime | None = Field(default=None, index=True)
+    last_checked_at: datetime = Field(default_factory=utcnow)
+    disabled_at: datetime | None = None
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
+
+
+class MediaRequest(SQLModel, table=True):
+    __tablename__ = "media_requests"
+    __table_args__ = (
+        UniqueConstraint(
+            "portal_user_id",
+            "open_slot",
+            name="ux_media_requests_user_open_slot",
+        ),
+    )
+
+    id: str = Field(default_factory=new_id, primary_key=True)
+    portal_user_id: str = Field(
+        foreign_key="portal_users.id",
+        ondelete="CASCADE",
+        index=True,
+    )
+    kind: str = Field(index=True)
+    title: str
+    details: str | None = None
+    status: str = Field(default="pending", index=True)
+    open_slot: int | None = Field(default=None)
+    admin_note: str | None = None
+    handled_by_user_id: str | None = Field(
+        default=None,
+        foreign_key="portal_users.id",
+        ondelete="SET NULL",
+        index=True,
+    )
+    created_at: datetime = Field(default_factory=utcnow, index=True)
+    updated_at: datetime = Field(default_factory=utcnow)
+    resolved_at: datetime | None = None
+
+
+class PointAccount(SQLModel, table=True):
+    __tablename__ = "point_accounts"
+
+    portal_user_id: str = Field(
+        primary_key=True,
+        foreign_key="portal_users.id",
+        ondelete="CASCADE",
+    )
+    balance: int = 0
+    lifetime_earned: int = Field(default=0, index=True)
+    leaderboard_opt_in: bool = Field(default=False, index=True)
+    updated_at: datetime = Field(default_factory=utcnow)
+
+
+class PointLedgerEntry(SQLModel, table=True):
+    __tablename__ = "point_ledger_entries"
+
+    id: str = Field(default_factory=new_id, primary_key=True)
+    portal_user_id: str = Field(
+        foreign_key="portal_users.id",
+        ondelete="CASCADE",
+        index=True,
+    )
+    amount: int
+    balance_after: int
+    kind: str = Field(index=True)
+    reference: str = Field(index=True, unique=True)
+    detail_json: str | None = None
+    created_at: datetime = Field(default_factory=utcnow, index=True)
+
+
+class DailyCheckin(SQLModel, table=True):
+    __tablename__ = "daily_checkins"
+    __table_args__ = (
+        UniqueConstraint("portal_user_id", "local_date", name="ux_daily_checkins_user_date"),
+    )
+
+    id: str = Field(default_factory=new_id, primary_key=True)
+    portal_user_id: str = Field(
+        foreign_key="portal_users.id",
+        ondelete="CASCADE",
+        index=True,
+    )
+    local_date: str = Field(index=True)
+    streak: int
+    points_awarded: int
+    ledger_entry_id: str = Field(
+        foreign_key="point_ledger_entries.id",
+        ondelete="RESTRICT",
+        unique=True,
+    )
+    created_at: datetime = Field(default_factory=utcnow)
+
+
+class ReferralInvite(SQLModel, table=True):
+    __tablename__ = "referral_invites"
+
+    id: str = Field(default_factory=new_id, primary_key=True)
+    inviter_user_id: str = Field(
+        foreign_key="portal_users.id",
+        ondelete="CASCADE",
+        index=True,
+    )
+    code_id: str = Field(
+        foreign_key="codes.id",
+        ondelete="CASCADE",
+        index=True,
+        unique=True,
+    )
+    used_by_user_id: str | None = Field(
+        default=None,
+        foreign_key="portal_users.id",
+        ondelete="SET NULL",
+        index=True,
+    )
+    reward_points: int
+    expires_at: datetime = Field(index=True)
+    settled_at: datetime | None = None
+    created_at: datetime = Field(default_factory=utcnow, index=True)
 
 
 class AuditLog(SQLModel, table=True):

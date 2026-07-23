@@ -24,6 +24,10 @@ from app.db import get_session
 from app.models import AuditLog, PortalUser, ReconciliationJob, utcnow
 from app.routers.auth import default_abs_permissions, get_abs_client_factory
 from app.security import hash_password
+from app.services.reconciliation import (
+    enqueue_reconciliation_job,
+    process_reconciliation_jobs,
+)
 
 router = APIRouter(prefix="/api/admin/users", tags=["admin-users"])
 
@@ -32,15 +36,15 @@ router = APIRouter(prefix="/api/admin/users", tags=["admin-users"])
 # Request models
 # ---------------------------------------------------------------------------
 class CreateUserRequest(BaseModel):
-    username: str = Field(min_length=3, max_length=64, pattern=r"^[a-zA-Z0-9_.-]+$")
-    password: str = Field(min_length=1, max_length=256)
+    username: str = Field(min_length=3, max_length=18, pattern=r"^[a-zA-Z0-9_.-]+$")
+    password: str = Field(min_length=1, max_length=18)
     durationDays: int = Field(default=30, ge=0, le=3650)
     email: str | None = None
     note: str | None = None
 
 
 class SetPasswordRequest(BaseModel):
-    password: str = Field(min_length=1, max_length=256)
+    password: str = Field(min_length=1, max_length=18)
 
 
 class SetStatusRequest(BaseModel):
@@ -109,7 +113,7 @@ def _audit(
     session.add(
         AuditLog(
             actor_user_id=str(claims.get("sub") or ""),
-            actor_username=str(claims.get("sub") or "admin"),
+            actor_username=str(claims.get("username") or "admin"),
             action=action,
             target_type="portal_user",
             target_id=target.id,
@@ -146,6 +150,25 @@ def _min_password_length() -> int:
 
 def _abs_error() -> HTTPException:
     return HTTPException(status_code=502, detail="媒体服务器暂时不可用，操作未完成，请稍后重试。")
+
+
+async def _process_reconciliation_now(
+    session: Session,
+    abs_factory: Callable[[], AudiobookshelfClient],
+    job: ReconciliationJob,
+) -> bool:
+    try:
+        async with abs_factory() as abs_client:
+            await process_reconciliation_jobs(
+                session,
+                abs_client,
+                limit=1,
+                job_id=job.id,
+            )
+    except Exception:  # noqa: BLE001 - the durable job remains retryable
+        return False
+    session.refresh(job)
+    return job.status == "succeeded"
 
 
 def _bulk_expiry_candidates(session: Session) -> tuple[list[PortalUser], list[PortalUser]]:
@@ -409,22 +432,35 @@ async def set_status(
         _ensure_admin_can_disable_or_delete(session, actor_id=str(claims.get("sub") or ""), target=user)
 
     is_active = payload.action == "enable"
-    if user.abs_user_id:
-        try:
-            async with abs_factory() as abs_client:
-                await abs_client.update_user(user.abs_user_id, {"isActive": is_active})
-        except (httpx.HTTPError, TypeError, RuntimeError) as exc:
-            raise _abs_error() from exc
+    expiry = _aware(user.expires_at)
+    if is_active and expiry is not None and expiry <= utcnow():
+        raise HTTPException(status_code=409, detail="账号已到期，请先延长有效期再启用。")
 
     user.status = "active" if is_active else "disabled"
     if not is_active:
         user.session_version = int(user.session_version or 0) + 1
     user.updated_at = utcnow()
     session.add(user)
+    job = None
+    if user.abs_user_id:
+        job = enqueue_reconciliation_job(
+            session,
+            idempotency_key=f"admin-status:{user.id}:{user.session_version}:{payload.action}",
+            operation="set_active",
+            target_type="portal_user",
+            target_id=user.id,
+            abs_user_id=user.abs_user_id,
+            payload={"isActive": is_active, "source": "admin_status"},
+        )
     _audit(session, claims, f"admin.user.{payload.action}", user)
     session.commit()
+    synced = True if job is None else await _process_reconciliation_now(session, abs_factory, job)
     session.refresh(user)
-    return {"user": _serialize(user, {"isActive": is_active})}
+    return {
+        "user": _serialize(user, {"isActive": is_active} if synced else None),
+        "upstreamSynced": synced,
+        "reconciliationJobId": job.id if job and not synced else None,
+    }
 
 
 @router.post("/bulk/expiry/preview")
@@ -450,7 +486,8 @@ async def bulk_extend_expiry(
     updated: list[PortalUser] = []
     reactivated = 0
     skipped_permanent = 0
-    upstream_reactivate_ids: list[str] = []
+    reactivation_jobs: list[ReconciliationJob] = []
+    reactivated_user_ids: set[str] = set()
     for user in users:
         base = _aware(user.expires_at)
         if base is None:
@@ -463,24 +500,27 @@ async def bulk_extend_expiry(
             user.status = "active"
             reactivated += 1
             if user.abs_user_id:
-                upstream_reactivate_ids.append(user.abs_user_id)
+                reactivated_user_ids.add(user.id)
+                reactivation_jobs.append(
+                    enqueue_reconciliation_job(
+                        session,
+                        idempotency_key=f"admin-bulk-expiry:{user.id}:{user.expires_at.isoformat()}",
+                        operation="set_active",
+                        target_type="portal_user",
+                        target_id=user.id,
+                        abs_user_id=user.abs_user_id,
+                        payload={"isActive": True, "source": "admin_bulk_expiry"},
+                    )
+                )
         user.updated_at = utcnow()
         session.add(user)
         updated.append(user)
-
-    try:
-        if upstream_reactivate_ids:
-            async with abs_factory() as abs_client:
-                for abs_user_id in upstream_reactivate_ids:
-                    await abs_client.update_user(abs_user_id, {"isActive": True})
-    except (httpx.HTTPError, TypeError, RuntimeError) as exc:
-        raise _abs_error() from exc
 
     if updated:
         session.add(
             AuditLog(
                 actor_user_id=str(claims.get("sub") or ""),
-                actor_username=str(claims.get("sub") or "admin"),
+                actor_username=str(claims.get("username") or "admin"),
                 action="admin.user.bulk_extend_expiry",
                 target_type="portal_user_bulk",
                 target_id="all_non_admin",
@@ -499,6 +539,10 @@ async def bulk_extend_expiry(
             )
         )
     session.commit()
+    synced_jobs = 0
+    for job in reactivation_jobs:
+        if await _process_reconciliation_now(session, abs_factory, job):
+            synced_jobs += 1
     for user in updated:
         session.refresh(user)
 
@@ -510,7 +554,24 @@ async def bulk_extend_expiry(
             "skippedPermanent": skipped_permanent,
             "skippedAdmins": len(skipped_admins),
         },
-        "users": [_serialize(user, {"isActive": True} if user.abs_user_id in upstream_reactivate_ids else None) for user in updated],
+        "upstream": {
+            "synced": synced_jobs,
+            "pending": len(reactivation_jobs) - synced_jobs,
+        },
+        "users": [
+            _serialize(
+                user,
+                {"isActive": True}
+                if user.id in reactivated_user_ids
+                and all(
+                    job.status == "succeeded"
+                    for job in reactivation_jobs
+                    if job.target_id == user.id
+                )
+                else None,
+            )
+            for user in updated
+        ],
     }
 
 
@@ -545,27 +606,27 @@ async def set_expiry(
     upstream_active: bool | None = None
 
     if should_disable_upstream:
-        if user.abs_user_id:
-            try:
-                async with abs_factory() as abs_client:
-                    await abs_client.update_user(user.abs_user_id, {"isActive": False})
-            except (httpx.HTTPError, TypeError, RuntimeError) as exc:
-                raise _abs_error() from exc
         user.status = "expired"
         user.session_version = int(user.session_version or 0) + 1
         upstream_active = False
     elif should_be_active and user.status == "expired":
-        if user.abs_user_id:
-            try:
-                async with abs_factory() as abs_client:
-                    await abs_client.update_user(user.abs_user_id, {"isActive": True})
-            except (httpx.HTTPError, TypeError, RuntimeError) as exc:
-                raise _abs_error() from exc
         user.status = "active"
         upstream_active = True
 
     user.updated_at = utcnow()
     session.add(user)
+    job = None
+    if user.abs_user_id and upstream_active is not None:
+        expiry_key = user.expires_at.isoformat() if user.expires_at else "permanent"
+        job = enqueue_reconciliation_job(
+            session,
+            idempotency_key=f"admin-expiry:{user.id}:{expiry_key}:{upstream_active}",
+            operation="set_active",
+            target_type="portal_user",
+            target_id=user.id,
+            abs_user_id=user.abs_user_id,
+            payload={"isActive": upstream_active, "source": "admin_expiry"},
+        )
     _audit(
         session,
         claims,
@@ -578,9 +639,18 @@ async def set_expiry(
         },
     )
     session.commit()
+    synced = True if job is None else await _process_reconciliation_now(session, abs_factory, job)
     session.refresh(user)
-    upstream = {"isActive": upstream_active} if upstream_active is not None else None
-    return {"user": _serialize(user, upstream)}
+    upstream = (
+        {"isActive": upstream_active}
+        if upstream_active is not None and synced
+        else None
+    )
+    return {
+        "user": _serialize(user, upstream),
+        "upstreamSynced": synced,
+        "reconciliationJobId": job.id if job and not synced else None,
+    }
 
 
 @router.delete("/{user_id}")
@@ -595,21 +665,27 @@ async def delete_user(
         raise HTTPException(status_code=404, detail="未找到该用户。")
     _ensure_admin_can_disable_or_delete(session, actor_id=str(claims.get("sub") or ""), target=user)
 
-    if user.abs_user_id:
-        try:
-            async with abs_factory() as abs_client:
-                await abs_client.delete_user(user.abs_user_id)
-        except httpx.HTTPStatusError as exc:
-            # 404 upstream means the account is already gone; treat as success.
-            if exc.response is None or exc.response.status_code != 404:
-                raise _abs_error() from exc
-        except (httpx.HTTPError, TypeError, RuntimeError) as exc:
-            raise _abs_error() from exc
-
     user.status = "deleted"
     user.session_version = int(user.session_version or 0) + 1
     user.updated_at = utcnow()
     session.add(user)
+    job = None
+    if user.abs_user_id:
+        job = enqueue_reconciliation_job(
+            session,
+            idempotency_key=f"admin-delete:{user.id}:{user.session_version}",
+            operation="delete_user",
+            target_type="portal_user",
+            target_id=user.id,
+            abs_user_id=user.abs_user_id,
+            payload={"source": "admin_delete"},
+        )
     _audit(session, claims, "admin.user.delete", user)
     session.commit()
-    return {"ok": True, "id": user_id}
+    synced = True if job is None else await _process_reconciliation_now(session, abs_factory, job)
+    return {
+        "ok": True,
+        "id": user_id,
+        "upstreamSynced": synced,
+        "reconciliationJobId": job.id if job and not synced else None,
+    }
