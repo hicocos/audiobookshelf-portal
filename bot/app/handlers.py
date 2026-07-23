@@ -231,7 +231,7 @@ def build_community_keyboard(data: dict[str, Any]) -> InlineKeyboardMarkup:
         )
     if features.get("requestsEnabled", True):
         community_row.append(
-            InlineKeyboardButton("📮 求书 / 播客", callback_data="request_start")
+            InlineKeyboardButton("📮 求有声书", callback_data="request_start")
         )
     if community_row:
         rows.append(community_row)
@@ -243,18 +243,6 @@ def build_community_keyboard(data: dict[str, Any]) -> InlineKeyboardMarkup:
         )
     rows.append([InlineKeyboardButton("‹ 返回首页", callback_data="panel_home")])
     return InlineKeyboardMarkup(rows)
-
-
-def build_request_type_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        [
-            [
-                InlineKeyboardButton("📕 有声书", callback_data="request_book"),
-                InlineKeyboardButton("🎙 播客", callback_data="request_podcast"),
-            ],
-            [InlineKeyboardButton("取消", callback_data="input_cancel")],
-        ]
-    )
 
 
 def build_bind_keyboard(web_console_url: str) -> InlineKeyboardMarkup:
@@ -343,7 +331,7 @@ def format_register_username_prompt(invite_info: dict[str, Any]) -> str:
     duration_text = "永久" if duration == 0 else f"{duration} 天"
     designated = invite_info.get("designatedUsername")
     extra = f"\n该邀请码指定用户名：{designated}" if designated else ""
-    return f"邀请码可用。\n有效期：{duration_text}{extra}\n\n创建账户 · 第 2 步 / 3\n请发送你想使用的用户名。\n\n允许：英文、数字、下划线、点、短横线，3-64 位。"
+    return f"邀请码可用。\n有效期：{duration_text}{extra}\n\n创建账户 · 第 2 步 / 3\n请发送你想使用的用户名。\n\n允许：英文、数字、下划线、点、短横线，3-18 位。"
 
 
 def format_register_confirm_prompt(username: str, invite_info: dict[str, Any]) -> str:
@@ -358,8 +346,14 @@ def format_bind_prompt() -> str:
 
 def format_request_notice() -> str:
     return (
-        "可以提交有声书或播客内容请求。\n"
-        "请注明作品名称、作者或主播、版本和当前集数；有链接也可一并提供。"
+        "目前仅提供喜马拉雅 FM 上的资源。\n\n"
+        "请提供详细信息，否则不予处理，包括但不限于：\n"
+        "平台：喜马拉雅 FM\n"
+        "作品名称：\n"
+        "演播者：\n"
+        "是否完结：\n"
+        "目前集数：\n\n"
+        "请按以上格式填写并发送。"
     )
 
 
@@ -436,7 +430,7 @@ def format_help(data: dict[str, Any] | None = None) -> str:
         "👤 账号与安全 · 续期、重置密码\n"
         "🎧 最近收听 · 首页最多展示 2 条\n"
         "🔍 搜索有声书 · 搜索你有权限访问的馆藏\n"
-        "🎁 积分与社区 · 签到、兑换、邀请、求书\n\n"
+        "🎁 积分与社区 · 签到、兑换、邀请、求有声书\n\n"
         "其他站点功能请前往网页控制台。\n\n"
         "随时发送 /start 返回首页；操作中发送 /cancel 可退出。"
     )
@@ -540,7 +534,7 @@ def format_leaderboard(data: dict[str, Any]) -> str:
 def format_media_requests(data: dict[str, Any]) -> str:
     items = data.get("items") or []
     if not items:
-        return "你还没有提交求书/播客工单。"
+        return "你还没有提交有声书工单。"
     labels = {
         "pending": "待处理",
         "accepted": "已接受",
@@ -549,10 +543,9 @@ def format_media_requests(data: dict[str, Any]) -> str:
     }
     lines = ["📮 我的工单"]
     for item in items[:10]:
-        kind = "有声书" if item.get("kind") == "book" else "播客"
         lines.append(
             f"- [{labels.get(str(item.get('status')), item.get('status'))}] "
-            f"{kind} · {escape(str(item.get('title') or ''))}"
+            f"{escape(str(item.get('title') or ''))}"
         )
     return "\n".join(lines)
 

@@ -19,7 +19,7 @@ import {
   UserPlus,
   Users,
 } from 'lucide-react';
-import { type ReactNode, useEffect, useMemo, useState } from 'react';
+import { type ReactNode, useEffect, useMemo, useRef, useState } from 'react';
 import { AccessibleModal } from '@/components/accessible-modal';
 import { NavDrawer } from '@/components/nav-drawer';
 import {
@@ -38,6 +38,7 @@ import {
 } from '@/lib/api';
 import { DEFAULT_ADMIN_SETTINGS, hydrateAdminSettings } from '@/lib/admin-settings';
 import { formatShanghaiDateTime } from '@/lib/datetime';
+import { idempotencyAttempt, IdempotencyAttempt } from '@/lib/idempotency';
 
 const requestStatusText: Record<string, string> = { pending: '待处理', accepted: '已受理', available: '已上架', rejected: '未采纳' };
 const membershipStatusText: Record<string, string> = { member: '群组成员', grace: '宽限期', disabled: '已停用' };
@@ -93,6 +94,8 @@ export default function AdminConfigPage() {
   const [broadcastAudience, setBroadcastAudience] = useState<BroadcastAudience>('active');
   const [broadcastMessage, setBroadcastMessage] = useState('');
   const [broadcastPreview, setBroadcastPreview] = useState<BroadcastPreview | null>(null);
+  const broadcastAttemptRef = useRef<IdempotencyAttempt | null>(null);
+  const broadcastInFlightRef = useRef(false);
   const [actionDialog, setActionDialog] = useState<ActionDialogConfig | null>(null);
 
   function hydrate(value: Partial<PublicSettings>) {
@@ -413,14 +416,28 @@ export default function AdminConfigPage() {
   }
 
   async function refreshOperations() {
-    const results = await Promise.all([
+    const results = await Promise.allSettled([
       api.adminOperationsOverview(), api.adminRequests(), api.adminNotifications(), api.adminMemberships(), api.adminAudit(50),
     ]);
-    setOperationsOverview(results[0]);
-    setRequests(results[1].items);
-    setNotifications(results[2].items);
-    setMemberships(results[3].items);
-    setAudit(results[4].items);
+    if (results[0].status === 'fulfilled') setOperationsOverview(results[0].value);
+    if (results[1].status === 'fulfilled') setRequests(results[1].value.items);
+    if (results[2].status === 'fulfilled') setNotifications(results[2].value.items);
+    if (results[3].status === 'fulfilled') setMemberships(results[3].value.items);
+    if (results[4].status === 'fulfilled') setAudit(results[4].value.items);
+    const failed = results.filter((result) => result.status === 'rejected').length;
+    if (failed) throw new Error(`有 ${failed} 个运营模块刷新失败，已保留其旧数据。`);
+  }
+
+  async function runRefresh(key: string, action: () => Promise<void>, fallback: string) {
+    setBusy(key);
+    try {
+      await action();
+      setMessage('刷新完成。');
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : fallback);
+    } finally {
+      setBusy('');
+    }
   }
 
   function updateMediaRequest(item: MediaRequestRecord, status: 'accepted' | 'available' | 'rejected') {
@@ -497,23 +514,33 @@ export default function AdminConfigPage() {
   }
 
   async function performBroadcast() {
-    if (!broadcastPreview || broadcastPreview.audience !== broadcastAudience) return;
+    if (!broadcastPreview || broadcastPreview.audience !== broadcastAudience || broadcastInFlightRef.current) return;
+    broadcastInFlightRef.current = true;
+    const signature = JSON.stringify({ audience: broadcastAudience, message: broadcastMessage.trim() });
+    const attempt = idempotencyAttempt(broadcastAttemptRef.current, signature);
+    broadcastAttemptRef.current = attempt;
     setBusy('broadcast-send');
     try {
       const result = await api.adminCreateBroadcast({
         audience: broadcastAudience,
         message: broadcastMessage.trim(),
         confirmCount: broadcastPreview.count,
-        idempotencyKey: crypto.randomUUID(),
+        idempotencyKey: attempt.key,
       });
+      broadcastAttemptRef.current = null;
       setBroadcastMessage('');
       setBroadcastPreview(null);
-      await refreshOperations();
-      setMessage(`广播已入队，共 ${result.queued} 条；发送结果可在通知队列查看。`);
+      let refreshWarning = '';
+      try {
+        await refreshOperations();
+      } catch (error) {
+        refreshWarning = `；${error instanceof Error ? error.message : '后续列表刷新失败，请稍后手动刷新。'}`;
+      }
+      setMessage(`广播已入队，共 ${result.queued} 条；发送结果可在通知队列查看${refreshWarning}`);
     } catch (error) {
-      setBroadcastPreview(null);
-      setMessage(error instanceof Error ? error.message : '广播入队失败，请重新预览。');
+      setMessage(error instanceof Error ? error.message : '广播入队失败，可直接重试。');
     } finally {
+      broadcastInFlightRef.current = false;
       setBusy('');
     }
   }
@@ -693,7 +720,7 @@ export default function AdminConfigPage() {
             <Sheet className="rounded-[20px] p-6 sm:p-7">
               <div className="flex flex-wrap items-start justify-between gap-4">
                 <SectionHeader eyebrow="运营总览" title="账号与自动化状态" body="集中查看账号、工单、通知、群组和后台任务是否正常。" />
-                <Button variant="secondary" loading={busy === 'refresh-operations'} onClick={async () => { setBusy('refresh-operations'); try { await refreshOperations(); } finally { setBusy(''); } }}><RefreshCcw size={15} /> 刷新</Button>
+                <Button variant="secondary" loading={busy === 'refresh-operations'} onClick={() => void runRefresh('refresh-operations', refreshOperations, '运营数据刷新失败。')}><RefreshCcw size={15} /> 刷新</Button>
               </div>
               <div className="mt-6 grid grid-cols-2 gap-3 lg:grid-cols-4">
                 <StatCard label="正常账号" value={operationsOverview?.users.active ?? 0} />
@@ -718,7 +745,7 @@ export default function AdminConfigPage() {
             <Sheet className="rounded-[20px] p-6 sm:p-7">
               <div className="flex flex-wrap items-start justify-between gap-4">
                 <SectionHeader eyebrow="账号管理" title="Portal 与媒体账号" body="创建、启停、改密、调整有效期及删除账号。" />
-                <Button variant="secondary" loading={busy === 'refresh-accounts'} onClick={async () => { setBusy('refresh-accounts'); try { await refreshAccounts(); } finally { setBusy(''); } }}><RefreshCcw size={15} /> 刷新</Button>
+                <Button variant="secondary" loading={busy === 'refresh-accounts'} onClick={() => void runRefresh('refresh-accounts', refreshAccounts, '账号列表刷新失败。')}><RefreshCcw size={15} /> 刷新</Button>
               </div>
               {!upstreamAvailable && <div className="mt-4"><StatusNote tone="warning">媒体服务器暂时不可用，部分同步状态可能不准确。</StatusNote></div>}
               <div className="mt-6 grid grid-cols-2 gap-3 sm:grid-cols-4">
@@ -733,8 +760,8 @@ export default function AdminConfigPage() {
               <Panel className="rounded-[20px] p-5">
                 <h3 className="font-display text-lg font-semibold"><UserPlus className="mr-2 inline" size={18} />创建账号</h3>
                 <div className="mt-4 grid gap-4 sm:grid-cols-2">
-                  <Text label="用户名" value={newUser.username} onChange={(value) => setNewUser({ ...newUser, username: value })} />
-                  <Text label="初始密码" type="password" value={newUser.password} onChange={(value) => setNewUser({ ...newUser, password: value })} />
+                  <Text label="用户名" value={newUser.username} maxLength={18} onChange={(value) => setNewUser({ ...newUser, username: value })} />
+                  <Text label="初始密码（6–18 位）" type="password" minLength={6} maxLength={18} value={newUser.password} onChange={(value) => setNewUser({ ...newUser, password: value })} />
                   <NumberInput label="有效天数（0 为永久）" value={newUser.durationDays} min={0} max={3650} onChange={(value) => setNewUser({ ...newUser, durationDays: value })} />
                 </div>
                 <Button variant="claret" className="mt-5 w-full" loading={busy === 'create-account'} loadingText="创建中" onClick={createAccount}><UserPlus size={15} /> 创建账号</Button>
@@ -803,7 +830,7 @@ export default function AdminConfigPage() {
             </Sheet>
 
             <Sheet className="rounded-[20px] p-6 sm:p-7">
-              <div className="flex items-center justify-between gap-4"><h3 className="font-display text-xl font-semibold">卡密列表</h3><Button variant="secondary" onClick={async () => setCodes((await api.listCodes()).codes)}><RefreshCcw size={15} /> 刷新</Button></div>
+              <div className="flex items-center justify-between gap-4"><h3 className="font-display text-xl font-semibold">卡密列表</h3><Button variant="secondary" loading={busy === 'refresh-codes'} onClick={() => void runRefresh('refresh-codes', async () => setCodes((await api.listCodes()).codes), '卡密列表刷新失败。')}><RefreshCcw size={15} /> 刷新</Button></div>
               <div className="mt-5 grid gap-3">
                 {codes.map((code) => (
                   <div key={code.id} className="flex flex-wrap items-center justify-between gap-3 rounded-[16px] border border-[rgba(231,246,253,.14)] bg-[rgba(255,255,255,.05)] p-4">
@@ -824,11 +851,11 @@ export default function AdminConfigPage() {
         {tab === 'operations' && (
           <div className="mt-5 grid gap-5">
             <Sheet className="rounded-[20px] p-6 sm:p-7">
-              <div className="flex flex-wrap items-start justify-between gap-4"><SectionHeader eyebrow="工单管理" title="求书 / 播客请求" body="受理、完成或拒绝用户请求；状态会同步到 Web，并通知已绑定 Telegram 的用户。" /><div className="flex gap-2"><select className="field !min-h-10 !w-auto" value={requestFilter} onChange={(event) => setRequestFilter(event.target.value)}><option value="open">待处理</option><option value="pending">新提交</option><option value="accepted">已受理</option><option value="available">已上架</option><option value="rejected">未采纳</option><option value="all">全部</option></select><Button variant="secondary" onClick={refreshOperations}><RefreshCcw size={15} /> 刷新全部</Button></div></div>
+              <div className="flex flex-wrap items-start justify-between gap-4"><SectionHeader eyebrow="工单管理" title="有声书请求" body="受理、完成或拒绝用户请求；状态会同步到 Web，并通知已绑定 Telegram 的用户。" /><div className="flex gap-2"><select className="field !min-h-10 !w-auto" value={requestFilter} onChange={(event) => setRequestFilter(event.target.value)}><option value="open">待处理</option><option value="pending">新提交</option><option value="accepted">已受理</option><option value="available">已上架</option><option value="rejected">未采纳</option><option value="all">全部</option></select><Button variant="secondary" loading={busy === 'refresh-operations'} onClick={() => void runRefresh('refresh-operations', refreshOperations, '运营数据刷新失败。')}><RefreshCcw size={15} /> 刷新全部</Button></div></div>
               <div className="mt-6 grid gap-3">
                 {filteredRequests.map((item) => (
                   <Panel key={item.id} className="rounded-[16px] p-4">
-                    <div className="flex flex-wrap items-start justify-between gap-3"><div><p className="font-display text-lg font-semibold">{item.title}</p><p className="mt-1 text-xs text-[var(--muted-foreground)]">{item.username || '未知用户'} · {item.kind === 'book' ? '有声书' : '播客'} · {formatShanghaiDateTime(item.createdAt)}</p></div><span className="rounded-full tag-gold px-3 py-1 text-xs font-semibold">{requestStatusText[item.status] || item.status}</span></div>
+                    <div className="flex flex-wrap items-start justify-between gap-3"><div><p className="font-display text-lg font-semibold">{item.title}</p><p className="mt-1 text-xs text-[var(--muted-foreground)]">{item.username || '未知用户'} · {formatShanghaiDateTime(item.createdAt)}</p></div><span className="rounded-full tag-gold px-3 py-1 text-xs font-semibold">{requestStatusText[item.status] || item.status}</span></div>
                     {item.details && <p className="mt-3 text-sm leading-6 text-[var(--muted-foreground)]">{item.details}</p>}
                     <div className="mt-4 flex flex-wrap gap-2"><SmallButton onClick={() => void updateMediaRequest(item, 'accepted')}>受理</SmallButton><SmallButton onClick={() => void updateMediaRequest(item, 'available')}>已上架</SmallButton><SmallButton danger onClick={() => void updateMediaRequest(item, 'rejected')}>拒绝</SmallButton></div>
                   </Panel>
@@ -877,7 +904,7 @@ export default function AdminConfigPage() {
         {tab === 'library' && (
           <div className="mt-5 grid gap-5">
             <Sheet className="rounded-[20px] p-6 sm:p-7">
-              <div className="flex flex-wrap items-start justify-between gap-4"><SectionHeader eyebrow="媒体库" title="ABS 实时概览" body="查看媒体库、上游账号收听进度和不活跃候选。" /><Button variant="secondary" onClick={async () => setLibrary(await api.adminLibraryOverview())}><RefreshCcw size={15} /> 刷新</Button></div>
+              <div className="flex flex-wrap items-start justify-between gap-4"><SectionHeader eyebrow="媒体库" title="ABS 实时概览" body="查看媒体库、上游账号收听进度和不活跃候选。" /><Button variant="secondary" loading={busy === 'refresh-library'} onClick={() => void runRefresh('refresh-library', async () => setLibrary(await api.adminLibraryOverview()), '媒体库刷新失败。')}><RefreshCcw size={15} /> 刷新</Button></div>
               <div className="mt-6 grid grid-cols-2 gap-3 lg:grid-cols-4"><StatCard label="媒体库" value={library?.stats.libraryCount ?? 0} /><StatCard label="上游账号" value={library?.stats.upstreamUserCount ?? 0} /><StatCard label="进度记录" value={library?.stats.progressCount ?? 0} /><StatCard label="不活跃候选" value={library?.stats.inactiveCandidateCount ?? 0} /></div>
               <div className="mt-6 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">{library?.libraries.map((item) => <Panel key={item.id} className="rounded-[14px] p-4"><p className="font-display font-semibold">{item.name}</p><p className="mt-1 text-xs text-[var(--muted-foreground)]">{item.mediaType} · 扫描：{item.lastScan ? formatShanghaiDateTime(item.lastScan) : '未知'}</p></Panel>)}</div>
             </Sheet>
@@ -970,7 +997,7 @@ export default function AdminConfigPage() {
                 <div className="mt-3">
                   <Check label="开放 Bot 管理台" checked={telegram.adminEnabled} onChange={(value) => setSettings({ ...settings, telegram: { ...telegram, adminEnabled: value } })} />
                   <Check label="启用必需群组资格同步" checked={telegram.groupMembershipEnabled} onChange={(value) => setSettings({ ...settings, telegram: { ...telegram, groupMembershipEnabled: value } })} />
-                  <Check label="开放求书 / 播客工单" checked={telegram.requestsEnabled} onChange={(value) => setSettings({ ...settings, telegram: { ...telegram, requestsEnabled: value } })} />
+                  <Check label="开放求有声书工单" checked={telegram.requestsEnabled} onChange={(value) => setSettings({ ...settings, telegram: { ...telegram, requestsEnabled: value } })} />
                 </div>
                 <div className="mt-4 grid gap-4 sm:grid-cols-2">
                   <Text label="必需群组 ID" value={telegram.requiredGroupId} onChange={(value) => setSettings({ ...settings, telegram: { ...telegram, requiredGroupId: value } })} />
@@ -1087,8 +1114,8 @@ function AdminActionDialog({ config, onClose }: { config: ActionDialogConfig; on
   );
 }
 
-function Text({ label, value, onChange, type = 'text' }: { label: string; value: string; onChange: (value: string) => void; type?: string }) {
-  return <label className="block"><span className="text-sm font-semibold text-[var(--muted-foreground)]">{label}</span><input className="field mt-2" type={type} value={value || ''} onChange={(event) => onChange(event.target.value)} /></label>;
+function Text({ label, value, onChange, type = 'text', minLength, maxLength }: { label: string; value: string; onChange: (value: string) => void; type?: string; minLength?: number; maxLength?: number }) {
+  return <label className="block"><span className="text-sm font-semibold text-[var(--muted-foreground)]">{label}</span><input className="field mt-2" type={type} minLength={minLength} maxLength={maxLength} value={value || ''} onChange={(event) => onChange(event.target.value)} /></label>;
 }
 
 function Textarea({ label, value, onChange, compact = false }: { label: string; value: string; onChange: (value: string) => void; compact?: boolean }) {

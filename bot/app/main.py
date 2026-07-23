@@ -87,9 +87,14 @@ def build_command_menu() -> list[BotCommand]:
         BotCommand("referral", "好友邀请"),
         BotCommand("recent", "查看最近收听"),
         BotCommand("search", "搜索有声书"),
-        BotCommand("request", "提交内容请求"),
-        BotCommand("requests", "查看内容请求"),
+        BotCommand("request", "求有声书"),
+        BotCommand("requests", "查看有声书工单"),
     ]
+
+
+def requires_group_membership(command: str) -> bool:
+    """Keep account onboarding reachable before membership can be verified."""
+    return command not in {"start", "help", "cancel", "bind", "register"}
 
 
 async def setup_bot(app: Application) -> None:
@@ -141,9 +146,14 @@ def build_application(settings: BotSettings | None = None) -> Application:
         ("leaderboard", leaderboard_command),
     )
     for command, handler in user_handlers:
+        gated_handler = (
+            required_group_handler(handler, API)
+            if requires_group_membership(command)
+            else handler
+        )
         app.add_handler(
             CommandHandler(
-                command, guarded_handler(required_group_handler(handler, API))
+                command, guarded_handler(gated_handler)
             )
         )
     for command, handler in (

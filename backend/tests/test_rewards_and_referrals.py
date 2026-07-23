@@ -140,6 +140,16 @@ async def test_points_redemption_uses_immutable_debit_and_extends_expiry():
         assert replay["idempotentReplay"] is True
         assert replay["balance"] == 200
         assert user.expires_at == first_expiry
+        with pytest.raises(RewardError, match="different parameters"):
+            await redeem_points_for_days(
+                session,
+                user,
+                days=1,
+                points_per_day=100,
+                max_days=30,
+                abs_factory=lambda: fake_abs,
+                idempotency_key="redeem-alice-001",
+            )
         entries = session.exec(
             select(PointLedgerEntry).where(PointLedgerEntry.portal_user_id == user.id)
         ).all()

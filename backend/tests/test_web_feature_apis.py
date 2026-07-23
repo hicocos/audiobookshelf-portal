@@ -42,6 +42,29 @@ def make_client():
         )
         session.add(
             PortalUser(
+                id="permanent-id",
+                username="permanent-listener",
+                password_hash="hash",
+                abs_user_id="abs-permanent",
+                abs_username="permanent-listener",
+                status="active",
+                expires_at=None,
+            )
+        )
+        session.add(
+            PortalUser(
+                id="pending-id",
+                username="pending-listener",
+                password_hash="hash",
+                abs_user_id="abs-pending",
+                abs_username="pending-listener",
+                status="pending",
+                telegram_binding_required=True,
+                expires_at=utcnow() + timedelta(days=30),
+            )
+        )
+        session.add(
+            PortalUser(
                 id="admin-id",
                 username="admin",
                 password_hash="hash",
@@ -98,9 +121,10 @@ def test_user_can_check_in_create_referral_and_submit_request():
         created = client.post(
             "/api/me/requests",
             headers=user_headers,
-            json={"kind": "book", "title": "测试有声书", "details": "作者测试"},
+            json={"title": "测试有声书", "details": "作者测试"},
         )
         assert created.status_code == 200
+        assert created.json()["item"]["kind"] == "book"
         listed = client.get("/api/me/requests", headers=user_headers)
         assert listed.json()["items"][0]["title"] == "测试有声书"
     finally:
@@ -115,8 +139,11 @@ def test_admin_can_review_and_update_request():
         created = client.post(
             "/api/me/requests",
             headers=user_headers,
-            json={"kind": "podcast", "title": "测试播客"},
+            # A stale client may still send the removed field. It is ignored
+            # and the request is normalized to the single audiobook kind.
+            json={"kind": "podcast", "title": "测试有声书"},
         ).json()["item"]
+        assert created["kind"] == "book"
 
         overview = client.get("/api/admin/operations/overview", headers=admin_headers)
         assert overview.status_code == 200
@@ -143,7 +170,7 @@ def test_open_request_limit_is_enforced_and_resolved_slot_can_be_reused():
             response = client.post(
                 "/api/me/requests",
                 headers=user_headers,
-                json={"kind": "book", "title": f"请求 {index + 1}"},
+                json={"title": f"请求 {index + 1}"},
             )
             assert response.status_code == 200
             created_ids.append(response.json()["item"]["id"])
@@ -151,7 +178,7 @@ def test_open_request_limit_is_enforced_and_resolved_slot_can_be_reused():
         limited = client.post(
             "/api/me/requests",
             headers=user_headers,
-            json={"kind": "book", "title": "请求 4"},
+            json={"title": "请求 4"},
         )
         assert limited.status_code == 429
 
@@ -164,9 +191,95 @@ def test_open_request_limit_is_enforced_and_resolved_slot_can_be_reused():
         replacement = client.post(
             "/api/me/requests",
             headers=user_headers,
-            json={"kind": "book", "title": "补位请求"},
+            json={"title": "补位请求"},
         )
         assert replacement.status_code == 200
+
+        reopened = client.post(
+            f"/api/admin/operations/requests/{created_ids[0]}",
+            headers=admin_headers,
+            json={"status": "accepted", "note": "重新受理"},
+        )
+        assert reopened.status_code == 409
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_user_can_cancel_own_open_request_and_delete_closed_request_only():
+    client = make_client()
+    try:
+        user_headers = headers("user-id", "user")
+        created = client.post(
+            "/api/me/requests",
+            headers=user_headers,
+            json={"title": "准备撤销的请求"},
+        ).json()["item"]
+
+        assert client.delete(
+            f"/api/me/requests/{created['id']}", headers=user_headers
+        ).status_code == 409
+
+        cancelled = client.post(
+            f"/api/me/requests/{created['id']}/cancel", headers=user_headers
+        )
+        assert cancelled.status_code == 200
+        assert cancelled.json()["item"]["status"] == "cancelled"
+        assert client.post(
+            f"/api/me/requests/{created['id']}/cancel", headers=user_headers
+        ).status_code == 409
+
+        deleted = client.delete(
+            f"/api/me/requests/{created['id']}", headers=user_headers
+        )
+        assert deleted.status_code == 200
+        assert deleted.json() == {"ok": True, "id": created["id"]}
+        assert client.get("/api/me/requests", headers=user_headers).json()["items"] == []
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_user_cannot_cancel_or_delete_another_users_request():
+    client = make_client()
+    try:
+        created = client.post(
+            "/api/me/requests",
+            headers=headers("user-id", "user"),
+            json={"title": "用户一的请求"},
+        ).json()["item"]
+        other_headers = headers("permanent-id", "user")
+        assert client.post(
+            f"/api/me/requests/{created['id']}/cancel", headers=other_headers
+        ).status_code == 404
+        assert client.delete(
+            f"/api/me/requests/{created['id']}", headers=other_headers
+        ).status_code == 404
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_user_can_cancel_existing_request_when_new_requests_are_disabled():
+    client = make_client()
+    try:
+        user_headers = headers("user-id", "user")
+        created = client.post(
+            "/api/me/requests",
+            headers=user_headers,
+            json={"title": "关闭功能前的请求"},
+        ).json()["item"]
+        with next(app.dependency_overrides[get_session]()) as session:
+            setting = session.get(AppSetting, "public_settings")
+            setting.value_json = json.dumps({"telegram": {"requestsEnabled": False}})
+            session.add(setting)
+            session.commit()
+
+        cancelled = client.post(
+            f"/api/me/requests/{created['id']}/cancel", headers=user_headers
+        )
+        assert cancelled.status_code == 200
+        assert cancelled.json()["item"]["status"] == "cancelled"
+        assert client.delete(
+            f"/api/me/requests/{created['id']}", headers=user_headers
+        ).status_code == 200
     finally:
         app.dependency_overrides.clear()
 
@@ -182,7 +295,7 @@ def test_expired_user_is_limited_to_recovery_features():
         assert client.post(
             "/api/me/requests",
             headers=headers("user-id", "user"),
-            json={"kind": "book", "title": "   "},
+            json={"title": "   "},
         ).status_code == 422
     finally:
         app.dependency_overrides.clear()
@@ -233,6 +346,32 @@ def test_me_returns_capabilities_for_active_expired_and_admin_users():
         assert admin.status_code == 200
         assert admin.json()["capabilities"]["canAdmin"] is True
         assert admin.json()["capabilities"]["canListen"] is True
+
+        permanent = client.get("/api/me", headers=headers("permanent-id", "user"))
+        assert permanent.status_code == 200
+        permanent_capabilities = permanent.json()["capabilities"]
+        assert permanent_capabilities["canRenew"] is False
+        assert permanent_capabilities["canRedeemPoints"] is False
+        assert permanent_capabilities["unavailableReasons"]["renew"] == "永久账号无需续期。"
+        assert permanent_capabilities["unavailableReasons"]["redeemPoints"] == "永久账号不能兑换有效期。"
+
+        pending = client.get("/api/me", headers=headers("pending-id", "user"))
+        assert pending.status_code == 200
+        pending_capabilities = pending.json()["capabilities"]
+        assert all(
+            pending_capabilities[key] is False
+            for key in (
+                "canListen",
+                "canRenew",
+                "canChangePassword",
+                "canCheckin",
+                "canRedeemPoints",
+                "canRefer",
+                "canRequest",
+                "canViewLeaderboard",
+            )
+        )
+        assert "绑定 Telegram" in pending_capabilities["unavailableReasons"]["listen"]
     finally:
         app.dependency_overrides.clear()
 

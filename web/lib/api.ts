@@ -113,6 +113,7 @@ export type PortalUser = {
   status: string;
   expiresAt: string | null;
   telegramBound?: boolean;
+  telegramBindingRequired?: boolean;
   telegramUsername?: string | null;
   telegramBoundAt?: string | null;
 };
@@ -208,7 +209,6 @@ export type ReferralRecord = {
 export type MediaRequestRecord = {
   id: string;
   username?: string;
-  kind: 'book' | 'podcast';
   title: string;
   details: string | null;
   status: string;
@@ -456,7 +456,9 @@ export const api = {
   referrals: () => request<{ items: ReferralRecord[] }>('/api/me/referrals'),
   createReferral: () => request<{ code: string; expiresAt: string; accountDays: number; rewardPoints: number; existing: boolean }>('/api/me/referrals', { method: 'POST' }),
   mediaRequests: () => request<{ items: MediaRequestRecord[] }>('/api/me/requests'),
-  createMediaRequest: (payload: { kind: 'book' | 'podcast'; title: string; details?: string }) => request<{ item: MediaRequestRecord }>('/api/me/requests', { method: 'POST', body: JSON.stringify(payload) }),
+  createMediaRequest: (payload: { title: string; details?: string }) => request<{ item: MediaRequestRecord }>('/api/me/requests', { method: 'POST', body: JSON.stringify(payload) }),
+  cancelMediaRequest: (requestId: string) => request<{ item: MediaRequestRecord }>(`/api/me/requests/${requestId}/cancel`, { method: 'POST' }),
+  deleteMediaRequest: (requestId: string) => request<{ ok: boolean; id: string }>(`/api/me/requests/${requestId}`, { method: 'DELETE' }),
   createCodes: (payload: { type: string; durationDays: number; count: number; maxUses: number; note?: string }) =>
     request<{ codes: CodeRecord[] }>('/api/admin/codes', { method: 'POST', body: JSON.stringify(payload) }),
   listCodes: () => request<{ codes: CodeRecord[] }>('/api/admin/codes'),

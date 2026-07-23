@@ -171,6 +171,68 @@ test('账号中心按能力隐藏入口并且不请求禁用功能', async ({ co
   expect(requested).not.toContain('/api/me/leaderboard');
 });
 
+test('签到成功使用弹窗提示', async ({ context, page }, testInfo) => {
+  await context.addCookies([{ name: 'moyin_session', value: 'e2e-session', domain: '127.0.0.1', path: '/' }]);
+  const capabilities = { canListen: false, canRenew: false, canChangePassword: true, canCheckin: true, canRedeemPoints: false, canRefer: false, canRequest: false, canViewLeaderboard: false, canAdmin: false, unavailableReasons: {} };
+  await page.route(meEndpoint, fulfillApi({ user: { id: 'u1', username: 'alice', role: 'user', status: 'active', expiresAt: '2027-01-01T00:00:00Z' }, capabilities }));
+  await page.route('**/api/me/rewards', fulfillApi({ balance: 10, lifetimeEarned: 10, leaderboardOptIn: false, streak: 1, lastCheckinDate: '2026-07-23', history: [] }));
+  await page.route('**/api/me/checkin', fulfillApi({ alreadyCheckedIn: false, date: '2026-07-23', streak: 1, pointsAwarded: 10, balance: 10 }));
+  await page.goto('/dashboard');
+  await expect(page.getByRole('heading', { name: 'alice' })).toBeVisible();
+  if (testInfo.project.name.startsWith('mobile-')) await page.getByRole('button', { name: '打开导航菜单' }).click();
+  await page.getByRole('button', { name: /积分权益/ }).click();
+  await expect(page.getByRole('heading', { name: '签到、积分与邀请' })).toBeVisible();
+  await page.getByRole('button', { name: /今日签到/ }).click();
+  await expect(page.getByRole('dialog')).toContainText('签到成功');
+  await expect(page.getByRole('dialog')).toContainText('获得 10 积分');
+});
+
+test('签到成功后积分刷新失败仍显示成功弹窗', async ({ context, page }, testInfo) => {
+  await context.addCookies([{ name: 'moyin_session', value: 'e2e-session', domain: '127.0.0.1', path: '/' }]);
+  const capabilities = { canListen: false, canRenew: false, canChangePassword: true, canCheckin: true, canRedeemPoints: false, canRefer: false, canRequest: false, canViewLeaderboard: false, canAdmin: false, unavailableReasons: {} };
+  await page.route(meEndpoint, fulfillApi({ user: { id: 'u1', username: 'alice', role: 'user', status: 'active', expiresAt: '2027-01-01T00:00:00Z' }, capabilities }));
+  let rewardsCalls = 0;
+  await page.route('**/api/me/rewards', async (route) => {
+    rewardsCalls += 1;
+    if (rewardsCalls === 1) await fulfillApi({ balance: 0, lifetimeEarned: 0, leaderboardOptIn: false, streak: 0, lastCheckinDate: null, history: [] })(route);
+    else await route.fulfill({ status: 503, json: { detail: 'refresh unavailable' } });
+  });
+  await page.route('**/api/me/checkin', fulfillApi({ alreadyCheckedIn: false, date: '2026-07-23', streak: 1, pointsAwarded: 10, balance: 10 }));
+  await page.goto('/dashboard');
+  await expect(page.getByRole('heading', { name: 'alice' })).toBeVisible();
+  if (testInfo.project.name.startsWith('mobile-')) await page.getByRole('button', { name: '打开导航菜单' }).click();
+  await page.getByRole('button', { name: /积分权益/ }).click();
+  await expect(page.getByRole('heading', { name: '签到、积分与邀请' })).toBeVisible();
+  await page.getByRole('button', { name: /今日签到/ }).click();
+  await expect(page.getByRole('dialog')).toContainText('签到成功');
+  await expect(page.getByText('当前积分').locator('..')).toContainText('10');
+});
+
+test('我的请求支持撤销和删除', async ({ context, page }, testInfo) => {
+  await context.addCookies([{ name: 'moyin_session', value: 'e2e-session', domain: '127.0.0.1', path: '/' }]);
+  const capabilities = { canListen: false, canRenew: false, canChangePassword: true, canCheckin: false, canRedeemPoints: false, canRefer: false, canRequest: true, canViewLeaderboard: false, canAdmin: false, unavailableReasons: {} };
+  await page.route(meEndpoint, fulfillApi({ user: { id: 'u1', username: 'alice', role: 'user', status: 'active', expiresAt: '2027-01-01T00:00:00Z' }, capabilities }));
+  const item = { id: 'req-1', title: '斗破苍穹', details: null, status: 'pending', adminNote: null, createdAt: '2026-07-23T00:00:00Z', updatedAt: '2026-07-23T00:00:00Z' };
+  await page.route('**/api/me/requests', async (route) => {
+    if (route.request().method() === 'GET') await fulfillApi({ items: [item] })(route);
+    else await route.fallback();
+  });
+  await page.route('**/api/me/requests/req-1/cancel', fulfillApi({ item: { ...item, status: 'cancelled' } }));
+  await page.route('**/api/me/requests/req-1', fulfillApi({ ok: true, id: 'req-1' }));
+  await page.goto('/dashboard');
+  await expect(page.getByRole('heading', { name: 'alice' })).toBeVisible();
+  if (testInfo.project.name.startsWith('mobile-')) await page.getByRole('button', { name: '打开导航菜单' }).click();
+  await page.getByRole('button', { name: /求有声书/ }).click();
+  await expect(page.getByRole('heading', { name: '我的请求' })).toBeVisible();
+  await page.getByRole('button', { name: '撤销' }).click();
+  await page.getByRole('button', { name: '确认撤销' }).click();
+  await expect(page.getByText('已撤销', { exact: true })).toBeVisible();
+  await page.getByRole('button', { name: '我知道了' }).click();
+  await page.getByRole('button', { name: '删除' }).click();
+  await page.getByRole('button', { name: '确认删除' }).click();
+  await expect(page.getByText('还没有提交内容请求。')).toBeVisible();
+});
+
 test('管理员登录页不预填或暗示固定用户名', async ({ page }) => {
   await page.goto('/admin');
   const username = page.getByLabel('管理员用户名');

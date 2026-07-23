@@ -91,11 +91,11 @@ function ResetPasswordForm() {
         <>
           <label className="mt-7 block">
             <span className="mb-2 flex items-center gap-2 text-sm font-black"><Lock size={15} /> 新密码</span>
-            <input className="field" type="password" autoComplete="new-password" value={password} onChange={(event) => setPassword(event.target.value)} placeholder={`至少 ${minLength} 位`} />
+            <input className="field" type="password" autoComplete="new-password" minLength={minLength} maxLength={18} value={password} onChange={(event) => setPassword(event.target.value)} placeholder={`${minLength}–18 位`} />
           </label>
           <label className="mt-4 block">
             <span className="mb-2 flex items-center gap-2 text-sm font-black"><ShieldCheck size={15} /> 确认新密码</span>
-            <input className="field" type="password" autoComplete="new-password" value={confirmPassword} onChange={(event) => setConfirmPassword(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') void submit(); }} placeholder="再次输入新密码" />
+            <input className="field" type="password" autoComplete="new-password" maxLength={18} value={confirmPassword} onChange={(event) => setConfirmPassword(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') void submit(); }} placeholder="再次输入新密码" />
           </label>
           <Button className="mt-6 w-full" loading={loading} loadingText="正在同步" onClick={submit}>确认重置密码</Button>
         </>

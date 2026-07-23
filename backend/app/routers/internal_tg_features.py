@@ -1,5 +1,5 @@
 import json
-from typing import Any, Literal
+from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field, field_validator
@@ -50,7 +50,6 @@ class ReferralRequest(TelegramRequest):
 
 
 class CreateMediaRequest(TelegramRequest):
-    kind: Literal["book", "podcast"]
     title: str = Field(min_length=1, max_length=200)
     details: str | None = Field(default=None, max_length=1000)
 
@@ -217,7 +216,6 @@ def create_media_request(
         item = create_open_media_request(
             session,
             portal_user_id=user.id,
-            kind=payload.kind,
             title=payload.title,
             details=payload.details,
         )
@@ -230,7 +228,7 @@ def create_media_request(
             action="telegram.media_request.create",
             target_type="media_request",
             target_id=item.id,
-            detail_json=json.dumps({"kind": item.kind, "title": item.title}, ensure_ascii=False),
+            detail_json=json.dumps({"title": item.title}, ensure_ascii=False),
         )
     )
     session.commit()
@@ -240,7 +238,14 @@ def create_media_request(
             dedupe_key=f"media-request-admin:{item.id}:{telegram_id}",
             telegram_id=telegram_id,
             kind="media_request_admin",
-            message=f"收到新的{ '有声书' if item.kind == 'book' else '播客' }请求：{item.title}",
+            message=(
+                "📮 收到新的有声书工单\n\n"
+                f"工单编号：{item.id}\n"
+                f"提交用户：{user.username}\n"
+                f"作品名称：{item.title}\n"
+                f"详细信息：\n{item.details or '未提供'}\n\n"
+                "请使用下方按钮处理。"
+            ),
         )
     return {"item": _serialize_request(item)}
 

@@ -235,9 +235,15 @@ async def redeem_points_for_days(
         select(PointLedgerEntry).where(PointLedgerEntry.reference == redemption_id)
     ).first()
     if existing is not None:
+        try:
+            original_detail = json.loads(existing.detail_json or "{}")
+        except (json.JSONDecodeError, TypeError):
+            original_detail = {}
+        if original_detail.get("days") != days or original_detail.get("pointsPerDay") != points_per_day:
+            raise RewardError("idempotency key was already used with different parameters")
         session.refresh(user)
         return {
-            "days": days,
+            "days": int(original_detail["days"]),
             "cost": abs(existing.amount),
             "balance": existing.balance_after,
             "expiresAt": _aware(user.expires_at).isoformat(),
@@ -280,9 +286,15 @@ async def redeem_points_for_days(
         existing = session.exec(
             select(PointLedgerEntry).where(PointLedgerEntry.reference == redemption_id)
         ).one()
+        try:
+            original_detail = json.loads(existing.detail_json or "{}")
+        except (json.JSONDecodeError, TypeError):
+            original_detail = {}
+        if original_detail.get("days") != days or original_detail.get("pointsPerDay") != points_per_day:
+            raise RewardError("idempotency key was already used with different parameters")
         current_user = session.get(PortalUser, user.id)
         return {
-            "days": days,
+            "days": int(original_detail["days"]),
             "cost": abs(existing.amount),
             "balance": existing.balance_after,
             "expiresAt": _aware(current_user.expires_at).isoformat(),

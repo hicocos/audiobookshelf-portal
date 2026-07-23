@@ -53,6 +53,7 @@ def test_migrations_add_telegram_columns_table_and_unique_index_to_legacy_databa
     portal_columns = _columns(engine, "portal_users")
     assert "telegram_username" in portal_columns
     assert "telegram_bound_at" in portal_columns
+    assert "telegram_binding_required" in portal_columns
 
     token_columns = _columns(engine, "telegram_bind_tokens")
     assert {
@@ -92,6 +93,30 @@ def test_migrations_are_idempotent():
 
     assert "telegram_username" in _columns(engine, "portal_users")
     assert "telegram_bound_at" in _columns(engine, "portal_users")
+    assert "telegram_binding_required" in _columns(engine, "portal_users")
+
+
+def test_migration_grandfathers_existing_accounts_out_of_required_binding():
+    engine = _legacy_engine()
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                """
+                INSERT INTO portal_users
+                (id, username, password_hash, role, status, abs_username, created_at, updated_at)
+                VALUES
+                ('legacy', 'legacy_user', 'hash', 'user', 'active', 'legacy_user', '2026-01-01', '2026-01-01')
+                """
+            )
+        )
+
+    run_migrations(engine)
+
+    with engine.connect() as conn:
+        required = conn.execute(
+            text("SELECT telegram_binding_required FROM portal_users WHERE id = 'legacy'")
+        ).scalar_one()
+    assert required == 0
 
 
 def test_telegram_id_unique_index_allows_multiple_nulls_but_rejects_duplicate_values():

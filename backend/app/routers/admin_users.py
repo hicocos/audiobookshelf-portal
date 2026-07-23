@@ -36,15 +36,15 @@ router = APIRouter(prefix="/api/admin/users", tags=["admin-users"])
 # Request models
 # ---------------------------------------------------------------------------
 class CreateUserRequest(BaseModel):
-    username: str = Field(min_length=3, max_length=64, pattern=r"^[a-zA-Z0-9_.-]+$")
-    password: str = Field(min_length=1, max_length=256)
+    username: str = Field(min_length=3, max_length=18, pattern=r"^[a-zA-Z0-9_.-]+$")
+    password: str = Field(min_length=1, max_length=18)
     durationDays: int = Field(default=30, ge=0, le=3650)
     email: str | None = None
     note: str | None = None
 
 
 class SetPasswordRequest(BaseModel):
-    password: str = Field(min_length=1, max_length=256)
+    password: str = Field(min_length=1, max_length=18)
 
 
 class SetStatusRequest(BaseModel):

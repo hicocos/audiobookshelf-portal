@@ -30,7 +30,7 @@ class RedeemRequest(BaseModel):
 
 class ChangePasswordRequest(BaseModel):
     currentPassword: str = Field(min_length=1, max_length=256)
-    newPassword: str = Field(min_length=1, max_length=256)
+    newPassword: str = Field(min_length=1, max_length=18)
 
 
 def get_current_user(
@@ -178,6 +178,8 @@ def delete_telegram_binding(
     user: PortalUser = Depends(get_current_user),
     session: Session = Depends(get_session),
 ) -> dict[str, Any]:
+    if user.telegram_binding_required:
+        raise HTTPException(status_code=409, detail="此账号必须绑定 Telegram，不能自行解绑。")
     user = unbind_telegram_user(session, user)
     return {"ok": True, "user": public_user(user)}
 

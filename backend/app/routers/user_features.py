@@ -1,4 +1,4 @@
-from typing import Any, Literal
+from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field, field_validator
@@ -18,7 +18,7 @@ from app.services.rewards import (
     set_leaderboard_opt_in,
 )
 from app.services.settings import get_public_settings
-from app.services.media_requests import MediaRequestLimitError, create_open_media_request
+from app.services.media_requests import MediaRequestLimitError, create_open_media_request, transition_open_media_request
 from app.services.telegram_admin import configured_admin_ids
 from app.services.telegram_notifications import enqueue_notification
 
@@ -35,7 +35,6 @@ class LeaderboardOptInRequest(BaseModel):
 
 
 class CreateMediaRequest(BaseModel):
-    kind: Literal["book", "podcast"]
     title: str = Field(min_length=1, max_length=200)
     details: str | None = Field(default=None, max_length=1000)
 
@@ -228,7 +227,6 @@ def create_request(
         item = create_open_media_request(
             session,
             portal_user_id=user.id,
-            kind=payload.kind,
             title=payload.title,
             details=payload.details,
         )
@@ -240,6 +238,55 @@ def create_request(
             dedupe_key=f"media-request-admin:{item.id}:{telegram_id}",
             telegram_id=telegram_id,
             kind="media_request_admin",
-            message=f"收到新的{'有声书' if item.kind == 'book' else '播客'}请求：{item.title}",
+            message=(
+                "📮 收到新的有声书工单\n\n"
+                f"工单编号：{item.id}\n"
+                f"提交用户：{user.username}\n"
+                f"作品名称：{item.title}\n"
+                f"详细信息：\n{item.details or '未提供'}\n\n"
+                "请使用下方按钮处理。"
+            ),
         )
     return {"item": _serialize_request(item)}
+
+
+def _owned_request(session: Session, user: PortalUser, request_id: str) -> MediaRequest:
+    item = session.exec(
+        select(MediaRequest).where(
+            MediaRequest.id == request_id,
+            MediaRequest.portal_user_id == user.id,
+        )
+    ).first()
+    if item is None:
+        raise HTTPException(status_code=404, detail="请求不存在。")
+    return item
+
+
+@router.post("/requests/{request_id}/cancel")
+def cancel_request(
+    request_id: str,
+    user: PortalUser = Depends(_user),
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    item = _owned_request(session, user, request_id)
+    try:
+        item = transition_open_media_request(session, request_id=item.id, status="cancelled")
+    except MediaRequestLimitError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    session.commit()
+    session.refresh(item)
+    return {"item": _serialize_request(item)}
+
+
+@router.delete("/requests/{request_id}")
+def delete_request(
+    request_id: str,
+    user: PortalUser = Depends(_user),
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    item = _owned_request(session, user, request_id)
+    if item.status in {"pending", "accepted"}:
+        raise HTTPException(status_code=409, detail="请先撤销待处理请求，再执行删除。")
+    session.delete(item)
+    session.commit()
+    return {"ok": True, "id": request_id}

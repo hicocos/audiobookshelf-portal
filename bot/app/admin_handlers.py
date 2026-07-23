@@ -14,32 +14,73 @@ def _admin_keyboard() -> InlineKeyboardMarkup:
         [
             [
                 InlineKeyboardButton("📮 工单管理", callback_data="adm_requests"),
-                InlineKeyboardButton("🔄 刷新统计", callback_data="adm_refresh"),
-            ],
-            [
-                InlineKeyboardButton("⏰ 7天内到期", callback_data="adm_users:expiring"),
-                InlineKeyboardButton("🟠 已到期", callback_data="adm_users:expired"),
-            ],
-            [
-                InlineKeyboardButton("⛔ 已停用", callback_data="adm_users:disabled"),
+                InlineKeyboardButton("🔄 刷新工单", callback_data="adm_refresh"),
             ],
         ]
     )
 
 
 def _format_stats(data: dict[str, Any]) -> str:
-    users = data.get("users") or {}
-    worker = data.get("worker") or {}
     return (
-        "🛡️ Telegram 管理台\n\n"
-        f"正常用户：{users.get('active', 0)}\n"
-        f"到期用户：{users.get('expired', 0)}\n"
-        f"停用用户：{users.get('disabled', 0)}\n"
-        f"待处理工单：{data.get('pendingRequests', 0)}\n"
-        f"群组宽限中：{data.get('groupGrace', 0)}\n"
-        f"待投递通知：{data.get('pendingNotifications', 0)}\n"
-        f"定时任务：{'正常' if worker.get('healthy') else '异常'}"
+        "📮 Telegram 工单管理\n\n"
+        f"待处理工单：{data.get('pendingRequests', 0)}\n\n"
+        "可直接进入工单列表进行接受、回复或结束操作。"
     )
+
+
+def _request_keyboard(request_id: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("✅ 接受请求", callback_data=f"adm_req:accepted:{request_id}"),
+                InlineKeyboardButton("💬 回复工单", callback_data=f"adm_req_reply:{request_id}"),
+            ],
+            [InlineKeyboardButton("🏁 结束工单", callback_data=f"adm_req:available:{request_id}")],
+        ]
+    )
+
+
+def _format_request(item: dict[str, Any]) -> str:
+    labels = {"pending": "待处理", "accepted": "已接受"}
+    details = str(item.get("details") or "未提供")
+    return (
+        "📮 有声书工单\n\n"
+        f"工单编号：{item.get('id')}\n"
+        f"提交用户：{item.get('username') or '未知'}\n"
+        f"作品名称：{item.get('title') or '未提供'}\n"
+        f"状态：{labels.get(str(item.get('status')), item.get('status') or '未知')}\n"
+        f"提交时间：{format_shanghai_datetime(item.get('createdAt'), fallback='未知')}\n\n"
+        f"详细信息：\n{details}"
+    )
+
+
+def _format_request_list(items: list[dict[str, Any]]) -> str:
+    labels = {"pending": "待处理", "accepted": "已接受"}
+    lines = [f"📮 待处理工单（{len(items)}）", ""]
+    for index, item in enumerate(items, start=1):
+        status = labels.get(str(item.get("status")), str(item.get("status") or "未知"))
+        lines.append(
+            f"{index}. [{status}] {item.get('title') or '未命名'} · "
+            f"{item.get('username') or '未知用户'}"
+        )
+    lines.extend(("", "点击下方对应工单查看详情并处理。"))
+    return "\n".join(lines)
+
+
+def _request_list_keyboard(items: list[dict[str, Any]]) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    for index, item in enumerate(items, start=1):
+        title = str(item.get("title") or "未命名")
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    f"{index} · {title[:24]}",
+                    callback_data=f"adm_req_view:{item.get('id')}",
+                )
+            ]
+        )
+    rows.append([InlineKeyboardButton("🔄 刷新工单", callback_data="adm_requests")])
+    return InlineKeyboardMarkup(rows)
 
 
 async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -214,24 +255,11 @@ async def admin_requests(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         if not items:
             await update.effective_message.reply_text("当前没有待处理工单。")
             return
-        for item in items[:10]:
-            request_id = str(item.get("id"))
-            await update.effective_message.reply_text(
-                f"{item.get('username')} · {item.get('title')}\n状态：{item.get('status')}\n"
-                f"说明：{item.get('details') or '-'}",
-                reply_markup=InlineKeyboardMarkup(
-                    [
-                        [
-                            InlineKeyboardButton("接受", callback_data=f"adm_req:accepted:{request_id}"),
-                            InlineKeyboardButton("已入库", callback_data=f"adm_req:available:{request_id}"),
-                        ],
-                        [
-                            InlineKeyboardButton("💬 回复用户", callback_data=f"adm_req_reply:{request_id}"),
-                            InlineKeyboardButton("拒绝", callback_data=f"adm_req:rejected:{request_id}"),
-                        ],
-                    ]
-                ),
-            )
+        visible = items[:10]
+        await update.effective_message.reply_text(
+            _format_request_list(visible),
+            reply_markup=_request_list_keyboard(visible),
+        )
     except httpx.HTTPStatusError as exc:
         await update.effective_message.reply_text(http_error_detail(exc, "工单列表加载失败。"))
 
@@ -250,6 +278,7 @@ async def handle_admin_request_reply(
     telegram_id, _username = telegram_identity(update)
     try:
         await API.admin_reply_request(telegram_id, request_id, text)
+        await API.cancel_flow(telegram_id)
         context.user_data.pop(INPUT_MODE_KEY, None)
         await update.effective_message.reply_text("回复已发送给用户。")
     except httpx.HTTPStatusError as exc:
@@ -272,6 +301,27 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             await admin_user_list(update, context, category)
     elif action == "adm_requests":
         await admin_requests(update, context)
+    elif action.startswith("adm_req_view:"):
+        request_id = action.partition(":")[2]
+        try:
+            data = await API.admin_requests(telegram_id)
+            item = next(
+                (
+                    candidate
+                    for candidate in (data.get("items") or [])
+                    if str(candidate.get("id")) == request_id
+                ),
+                None,
+            )
+            if item is None:
+                await query.message.reply_text("该工单不存在或已处理。")
+                return
+            await query.message.reply_text(
+                _format_request(item),
+                reply_markup=_request_keyboard(request_id),
+            )
+        except httpx.HTTPStatusError as exc:
+            await query.message.reply_text(http_error_detail(exc, "工单详情加载失败。"))
     elif action.startswith("adm_extend:"):
         _prefix, days_text, user_id = action.split(":", 2)
         if not days_text.isdigit():
@@ -331,6 +381,11 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             await query.message.reply_text(http_error_detail(exc, "工单更新失败。"))
     elif action.startswith("adm_req_reply:"):
         request_id = action.partition(":")[2]
+        await API.start_flow(
+            telegram_id,
+            kind="input",
+            step=f"admin_request_reply:{request_id}",
+        )
         context.user_data[INPUT_MODE_KEY] = f"admin_request_reply:{request_id}"
         await query.message.reply_text(
             "请直接发送要回复给用户的内容（1–500 字）。\n发送 /cancel 可取消。"

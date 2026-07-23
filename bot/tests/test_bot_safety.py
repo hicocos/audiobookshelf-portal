@@ -5,6 +5,7 @@ import time
 import httpx
 import pytest
 from telegram.constants import ChatType
+from telegram.constants import ChatMemberStatus
 
 from app.main import (
     _http_error_detail,
@@ -13,7 +14,9 @@ from app.main import (
 )
 from app.logging_config import JsonFormatter
 from app.health import check_bot_health, write_bot_heartbeat
-from app.notifications import next_poll_delay
+from app.notifications import notification_reply_markup, next_poll_delay
+from app.user_handlers import callback_menu
+from app.community import required_group_handler
 
 
 class FakeMessage:
@@ -44,6 +47,57 @@ class FakeContext:
         self.user_data = {}
 
 
+def test_new_request_notification_has_direct_ticket_actions():
+    markup = notification_reply_markup(
+        {
+            "kind": "media_request_admin",
+            "dedupeKey": "media-request-admin:req-123:900",
+        }
+    )
+    buttons = [button for row in markup.inline_keyboard for button in row]
+    assert [button.text for button in buttons] == [
+        "✅ 接受请求",
+        "💬 回复工单",
+        "🏁 结束工单",
+    ]
+
+
+def test_processed_request_notification_links_to_web_ticket_tab(monkeypatch):
+    monkeypatch.setenv("PORTAL_PUBLIC_URL", "https://moyin.cc")
+    markup = notification_reply_markup(
+        {
+            "kind": "media_request_status",
+            "dedupeKey": "media-request-status:req-123:available",
+        }
+    )
+    buttons = [button for row in markup.inline_keyboard for button in row]
+    assert [button.text for button in buttons] == ["🌐 Web 端查看工单"]
+    assert buttons[0].url == "https://moyin.cc/dashboard?tab=requests"
+
+
+@pytest.mark.asyncio
+async def test_callback_answer_timeout_does_not_abort_requested_action(monkeypatch):
+    class Query:
+        data = "request_start"
+        message = FakeMessage()
+
+        async def answer(self):
+            from telegram.error import TimedOut
+
+            raise TimedOut("telegram timeout")
+
+    update = FakeUpdate()
+    update.callback_query = Query()
+    started = []
+
+    async def fake_begin(_context, telegram_id, mode):
+        started.append((telegram_id, mode))
+
+    monkeypatch.setattr("app.user_handlers._begin_local_input", fake_begin)
+    await callback_menu(update, FakeContext())
+    assert started == [(123, "request_audiobook")]
+
+
 @pytest.mark.asyncio
 async def test_private_chat_guard_refuses_group_without_running_handler():
     update = FakeUpdate(ChatType.GROUP)
@@ -71,6 +125,61 @@ async def test_private_chat_guard_allows_private_handler():
 
     await guarded_handler(handler)(update, FakeContext())
     assert called is True
+
+
+@pytest.mark.asyncio
+async def test_bind_callback_bypasses_group_lookup_to_avoid_onboarding_deadlock():
+    update = FakeUpdate()
+    update.callback_query = type("Query", (), {"data": "bind_start"})()
+    called = False
+
+    async def handler(_update, _context):
+        nonlocal called
+        called = True
+
+    class Api:
+        async def community_config(self):
+            raise AssertionError("binding callback must not query group membership")
+
+    await required_group_handler(handler, Api())(update, FakeContext())
+    assert called is True
+
+
+@pytest.mark.asyncio
+async def test_non_member_in_account_grace_is_still_blocked_from_bot_features():
+    update = FakeUpdate()
+    called = False
+
+    async def handler(_update, _context):
+        nonlocal called
+        called = True
+
+    class Api:
+        async def community_config(self):
+            return {
+                "enabled": True,
+                "groupId": "-1004319046591",
+                "inviteUrl": "https://t.me/moyinclub",
+            }
+
+        async def report_membership(self, *_args, **_kwargs):
+            return {
+                "bound": True,
+                "status": "grace",
+                "graceExpiresAt": "2026-07-24T00:00:00Z",
+            }
+
+    class Bot:
+        async def get_chat_member(self, **_kwargs):
+            return type("Member", (), {"status": ChatMemberStatus.LEFT})()
+
+    context = FakeContext()
+    context.bot = Bot()
+    context.bot_data = {}
+    await required_group_handler(handler, Api())(update, context)
+
+    assert called is False
+    assert update.effective_message.replies[-1] == "使用 Bot 前需要先加入指定群组。加入后请重新发送命令。"
 
 
 @pytest.mark.asyncio

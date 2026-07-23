@@ -54,7 +54,7 @@ class TelegramIdRequest(BaseModel):
 class RegisterRequest(BaseModel):
     telegramId: str = Field(min_length=1, max_length=64)
     telegramUsername: str | None = Field(default=None, max_length=128)
-    username: str = Field(min_length=3, max_length=64, pattern=r"^[a-zA-Z0-9_.-]+$")
+    username: str = Field(min_length=3, max_length=18, pattern=r"^[a-zA-Z0-9_.-]+$")
     inviteCode: str = Field(min_length=3, max_length=128)
 
 
@@ -65,13 +65,13 @@ class InviteCheckRequest(BaseModel):
 
 class UsernameCheckRequest(BaseModel):
     telegramId: str = Field(min_length=1, max_length=64)
-    username: str = Field(min_length=3, max_length=64, pattern=r"^[a-zA-Z0-9_.-]+$")
+    username: str = Field(min_length=3, max_length=18, pattern=r"^[a-zA-Z0-9_.-]+$")
     inviteCode: str | None = Field(default=None, min_length=3, max_length=128)
 
 
 class FlowStartRequest(BaseModel):
     telegramId: str = Field(min_length=1, max_length=64)
-    kind: Literal["register", "bind", "renew"]
+    kind: Literal["register", "bind", "renew", "input"]
     step: str = Field(min_length=1, max_length=64)
 
 
@@ -319,6 +319,7 @@ async def _register_account(
     user.telegram_id = telegram_id
     user.telegram_username = (telegram_username or "").strip() or None
     user.telegram_bound_at = utcnow()
+    user.telegram_binding_required = True
     user.updated_at = utcnow()
     session.add(user)
     try:
@@ -386,8 +387,42 @@ async def confirm_register(
     return result
 
 
+async def _activate_required_binding(
+    user: PortalUser,
+    session: Session,
+    abs_factory: Any,
+) -> PortalUser:
+    if not user.telegram_binding_required or user.status != "pending":
+        return user
+    if user.abs_user_id:
+        try:
+            async with abs_factory() as abs_client:
+                await abs_client.update_user(user.abs_user_id, {"isActive": True})
+        except (httpx.HTTPError, TypeError, RuntimeError) as exc:
+            raise HTTPException(
+                status_code=502,
+                detail="Telegram 已绑定，但媒体账号暂未启用，请稍后重新打开 Bot 自动重试。",
+            ) from exc
+    now = utcnow()
+    if user.expires_at is not None:
+        current_expiry = _aware(user.expires_at)
+        created_at = _aware(user.created_at) or now
+        if current_expiry is not None:
+            user.expires_at = current_expiry + max(now - created_at, timedelta(0))
+    user.status = "active"
+    user.updated_at = now
+    session.add(user)
+    session.commit()
+    session.refresh(user)
+    return user
+
+
 @router.post("/bind")
-def bind(payload: BindRequest, session: Session = Depends(get_session)) -> dict[str, Any]:
+async def bind(
+    payload: BindRequest,
+    session: Session = Depends(get_session),
+    abs_factory: Any = Depends(get_abs_client_factory),
+) -> dict[str, Any]:
     try:
         user = bind_telegram_user(
             session,
@@ -398,6 +433,7 @@ def bind(payload: BindRequest, session: Session = Depends(get_session)) -> dict[
         )
     except TelegramBindingError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    user = await _activate_required_binding(user, session, abs_factory)
     clear_flow(session, payload.telegramId)
     return _bound_response(user, session)
 
@@ -412,6 +448,7 @@ async def me(
     if user is None:
         public_settings = get_public_settings(session)
         return {"bound": False, "features": public_settings.get("telegram", {})}
+    user = await _activate_required_binding(user, session, abs_factory)
     await disable_upstream_if_expired(user, session, abs_factory)
     session.refresh(user)
     return _bound_response(user, session)
@@ -569,6 +606,7 @@ def claim_notification_batch(
                 "telegramId": item.telegram_id,
                 "kind": item.kind,
                 "message": item.message,
+                "dedupeKey": item.dedupe_key,
                 "attempts": item.attempts,
             }
             for item in items

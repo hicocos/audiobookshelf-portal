@@ -50,6 +50,7 @@ export default function LoginPage() {
           <p className="kicker mt-8 lg:mt-0">账号登录</p>
           <h2 className="display-md mt-3">登录 {siteName}</h2>
           <p className="lede mt-3 text-sm">输入账号和密码，进入个人中心。</p>
+          <div className="mt-5"><StatusNote tone="warning">新注册账号需要在账号中心绑定 Telegram Bot 后才会启用；已有账号继续按原方式使用。</StatusNote></div>
           {message && <div className="mt-5"><StatusNote tone="danger">{message}</StatusNote>{supportUrl && <a href={supportUrl} target="_blank" rel="noreferrer" className="mt-3 inline-flex items-center gap-1.5 text-sm font-black text-[var(--primary)] underline underline-offset-4"><LifeBuoy size={14} /> 登录遇到问题？联系管理员</a>}</div>}
           <label className="mt-7 block"><span className="mb-2 flex items-center gap-2 text-sm font-black"><User size={15} /> 用户名</span><input className="field" autoComplete="username" placeholder="输入用户名" value={username} onChange={(e) => setUsername(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') void submit(); }} /></label>
           <label className="mt-4 block"><span className="mb-2 flex items-center gap-2 text-sm font-black"><Lock size={15} /> 密码</span><input className="field" autoComplete="current-password" type="password" placeholder="输入密码" value={password} onChange={(e) => setPassword(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') void submit(); }} /></label>

@@ -76,6 +76,11 @@ async def report_group_membership(
                     target_id=user.id,
                 )
             )
+    elif not user.telegram_binding_required:
+        membership.status = "exempt"
+        membership.left_at = now
+        membership.grace_expires_at = None
+        membership.disabled_at = None
     elif membership.status not in {"grace", "disabled"}:
         membership.status = "grace"
         membership.left_at = now
@@ -127,6 +132,13 @@ async def enforce_group_grace_periods(
         user = session.get(PortalUser, membership.portal_user_id)
         if user is None or user.role in {"admin", "root"}:
             membership.status = "member"
+            session.add(membership)
+            continue
+        if not user.telegram_binding_required:
+            membership.status = "exempt"
+            membership.grace_expires_at = None
+            membership.disabled_at = None
+            membership.updated_at = now
             session.add(membership)
             continue
         if user.status == "active":

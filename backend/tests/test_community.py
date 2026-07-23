@@ -39,7 +39,12 @@ def make_engine():
     return engine
 
 
-def seed_user(session: Session, *, role: str = "user") -> PortalUser:
+def seed_user(
+    session: Session,
+    *,
+    role: str = "user",
+    telegram_binding_required: bool = True,
+) -> PortalUser:
     user = PortalUser(
         username=f"community-{role}",
         username_normalized=f"community-{role}",
@@ -50,11 +55,37 @@ def seed_user(session: Session, *, role: str = "user") -> PortalUser:
         telegram_bound_at=utcnow(),
         expires_at=utcnow() + timedelta(days=30),
         role=role,
+        telegram_binding_required=telegram_binding_required,
     )
     session.add(user)
     session.commit()
     session.refresh(user)
     return user
+
+
+@pytest.mark.asyncio
+async def test_legacy_exempt_user_is_never_put_on_account_disable_grace():
+    engine = make_engine()
+    fake_abs = FakeAbsClient()
+    with Session(engine) as session:
+        user = seed_user(session, telegram_binding_required=False)
+        membership = await report_group_membership(
+            session,
+            user,
+            group_id="-100123",
+            is_member=False,
+            grace_hours=72,
+            abs_factory=lambda: fake_abs,
+        )
+
+        assert membership.status == "exempt"
+        assert membership.grace_expires_at is None
+        assert session.exec(select(TelegramNotification)).all() == []
+        result = await enforce_group_grace_periods(session, fake_abs)
+        session.refresh(user)
+        assert result == {"checked": 0, "disabled": 0, "failed": 0}
+        assert user.status == "active"
+        assert fake_abs.updates == []
 
 
 @pytest.mark.asyncio

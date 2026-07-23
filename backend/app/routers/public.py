@@ -22,7 +22,7 @@ router = APIRouter()
 
 class PasswordResetRequest(BaseModel):
     token: str = Field(min_length=32, max_length=256)
-    newPassword: str = Field(min_length=1, max_length=256)
+    newPassword: str = Field(min_length=1, max_length=18)
 
 
 class PasswordResetValidationRequest(BaseModel):

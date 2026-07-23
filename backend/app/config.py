@@ -24,7 +24,7 @@ class Settings(BaseSettings):
     session_cookie_samesite: str = Field(default="lax", alias="SESSION_COOKIE_SAMESITE")
     registration_enabled: bool = True
     default_valid_days: int = 30
-    portal_password_min_length: int = Field(default=3, alias="PORTAL_PASSWORD_MIN_LENGTH")
+    portal_password_min_length: int = Field(default=6, alias="PORTAL_PASSWORD_MIN_LENGTH")
     next_public_site_name: str = Field(default="MoYin.CC", alias="NEXT_PUBLIC_SITE_NAME")
     cors_allowed_origins: str = Field(
         default="http://localhost:3009,http://127.0.0.1:3009",

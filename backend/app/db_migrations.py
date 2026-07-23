@@ -35,6 +35,13 @@ def run_migrations(engine: Engine) -> None:
                 conn.execute(text("ALTER TABLE portal_users ADD COLUMN telegram_username VARCHAR"))
             if "telegram_bound_at" not in columns:
                 conn.execute(text("ALTER TABLE portal_users ADD COLUMN telegram_bound_at DATETIME"))
+            if "telegram_binding_required" not in columns:
+                conn.execute(
+                    text(
+                        "ALTER TABLE portal_users ADD COLUMN telegram_binding_required "
+                        "BOOLEAN NOT NULL DEFAULT 0"
+                    )
+                )
             if "session_version" not in columns:
                 conn.execute(
                     text(

@@ -271,6 +271,7 @@ def test_internal_register_creates_portal_and_abs_user_bound_to_telegram(monkeyp
             assert saved is not None
             assert saved.telegram_id == "987654321"
             assert saved.telegram_username == "alice_tg"
+            assert saved.telegram_binding_required is True
             code = session.exec(select(Code).where(Code.code == "INVITE-TG")).one()
             assert code.used_count == 1
     finally:
@@ -293,6 +294,38 @@ def test_internal_register_rejects_when_telegram_already_bound(monkeypatch):
 
         assert response.status_code == 409
         assert fake_abs.created == []
+    finally:
+        teardown_client()
+
+
+def test_binding_activates_web_registered_pending_account(monkeypatch):
+    client, engine, fake_abs, token = make_client(monkeypatch)
+    try:
+        with Session(engine) as session:
+            user = seed_user(session, status="pending", abs_user_id="abs-alice")
+            user.telegram_binding_required = True
+            user.created_at = utcnow() - timedelta(days=2)
+            user.expires_at = user.created_at + timedelta(days=5)
+            session.add(user)
+            session.commit()
+            code, _ = create_bind_token(session, user)
+            user_id = user.id
+            old_expiry = user.expires_at
+
+        response = client.post(
+            "/api/internal/tg/bind",
+            headers=auth_headers(token),
+            json={"code": code, "telegramId": "987654321", "telegramUsername": "alice_tg"},
+        )
+
+        assert response.status_code == 200, response.text
+        assert response.json()["user"]["status"] == "active"
+        with Session(engine) as session:
+            saved = session.get(PortalUser, user_id)
+            assert saved.status == "active"
+            assert saved.telegram_id == "987654321"
+            assert saved.expires_at > old_expiry + timedelta(days=1)
+        assert fake_abs.user["isActive"] is True
     finally:
         teardown_client()
 
@@ -330,6 +363,27 @@ def test_persistent_registration_flow_survives_across_requests(monkeypatch):
         assert client.get("/api/internal/tg/flow/42", headers=auth_headers(token)).json() == {
             "active": False
         }
+    finally:
+        teardown_client()
+
+
+def test_input_flow_can_persist_audiobook_request_step(monkeypatch):
+    client, _engine, _fake_abs, token = make_client(monkeypatch)
+    try:
+        started = client.post(
+            "/api/internal/tg/flow/start",
+            headers=auth_headers(token),
+            json={
+                "telegramId": "42",
+                "kind": "input",
+                "step": "request_audiobook",
+            },
+        )
+        assert started.status_code == 200, started.text
+        flow = client.get("/api/internal/tg/flow/42", headers=auth_headers(token))
+        assert flow.status_code == 200
+        assert flow.json()["kind"] == "input"
+        assert flow.json()["step"] == "request_audiobook"
     finally:
         teardown_client()
 
@@ -388,16 +442,16 @@ def test_telegram_password_reset_link_is_one_time_and_syncs_abs(monkeypatch):
         assert client.get(f"/api/public/password-reset?token={raw_token}").status_code == 405
         consumed = client.post(
             "/api/public/password-reset",
-            json={"token": raw_token, "newPassword": "A-brand-new-password"},
+            json={"token": raw_token, "newPassword": "Brand-new-pass18"},
         )
         assert consumed.status_code == 200, consumed.text
-        assert fake_abs.user["password"] == "A-brand-new-password"
+        assert fake_abs.user["password"] == "Brand-new-pass18"
         with Session(engine) as session:
             saved = session.get(PortalUser, user_id)
-            assert verify_password("A-brand-new-password", saved.password_hash)
+            assert verify_password("Brand-new-pass18", saved.password_hash)
         reused = client.post(
             "/api/public/password-reset",
-            json={"token": raw_token, "newPassword": "Another-brand-new-password"},
+            json={"token": raw_token, "newPassword": "Another-new-pass"},
         )
         assert reused.status_code == 400
     finally:
@@ -600,13 +654,24 @@ def test_media_request_lifecycle_notifies_admin_and_requester(monkeypatch):
             headers=auth_headers(token),
             json={
                 "telegramId": "42",
-                "kind": "book",
                 "title": "测试有声书",
                 "details": "希望收录完整版",
             },
         )
         assert created.status_code == 200, created.text
         request_id = created.json()["item"]["id"]
+        claimed = client.post(
+            "/api/internal/tg/notifications/claim",
+            headers=auth_headers(token),
+            json={"limit": 10},
+        )
+        admin_notice = next(
+            item for item in claimed.json()["items"] if item["kind"] == "media_request_admin"
+        )
+        assert admin_notice["dedupeKey"] == f"media-request-admin:{request_id}:900"
+        assert "工单编号" in admin_notice["message"]
+        assert "提交用户：requester" in admin_notice["message"]
+        assert "作品名称：测试有声书" in admin_notice["message"]
         listed = client.post(
             "/api/internal/tg/admin/requests/list",
             headers=auth_headers(token),
@@ -637,6 +702,12 @@ def test_media_request_lifecycle_notifies_admin_and_requester(monkeypatch):
                 ("42", "media_request_reply"),
                 ("42", "media_request_status"),
             }
+            status_notice = next(
+                notice for notice in notices if notice.kind == "media_request_status"
+            )
+            assert status_notice.message == (
+                "您的工单已经处理。详细信息请到 Web 端查看。"
+            )
             reply = next(
                 notice for notice in notices if notice.kind == "media_request_reply"
             )

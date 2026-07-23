@@ -52,7 +52,7 @@ def test_public_config_uses_defaults_without_upstream_brand():
         data = response.json()
         assert data["siteName"] == "MoYin.CC"
         assert data["tagline"] == "安静的声音栖地"
-        assert data["passwordMinLength"] == 3
+        assert data["passwordMinLength"] == 6
         assert "Audiobookshelf" not in str(data)
         assert data["features"]["registration"] is True
         assert data["copy"]["heroTitle"]

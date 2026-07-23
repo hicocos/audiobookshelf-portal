@@ -25,7 +25,7 @@ from app.routers.auth import get_abs_client_factory
 from app.services.inactivity import sync_inactive_users
 from app.services.rewards import RewardError, credit_points, debit_points
 from app.services.settings import get_public_settings
-from app.services.media_requests import apply_media_request_status
+from app.services.media_requests import MediaRequestLimitError, transition_open_media_request
 from app.services.telegram_notifications import enqueue_notification
 from app.worker_health import worker_health_status
 
@@ -185,13 +185,16 @@ def update_request(
     item = session.get(MediaRequest, request_id)
     if item is None:
         raise HTTPException(status_code=404, detail="未找到该工单。")
-    apply_media_request_status(item, payload.status)
-    item.admin_note = (payload.note or "").strip() or None
-    item.handled_by_user_id = str(claims.get("sub") or "") or None
-    item.updated_at = utcnow()
-    if payload.status in {"available", "rejected"}:
-        item.resolved_at = utcnow()
-    session.add(item)
+    try:
+        item = transition_open_media_request(
+            session,
+            request_id=item.id,
+            status=payload.status,
+            admin_note=(payload.note or "").strip() or None,
+            handled_by_user_id=str(claims.get("sub") or "") or None,
+        )
+    except MediaRequestLimitError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     session.add(
         AuditLog(
             actor_user_id=str(claims.get("sub") or "") or None,
@@ -205,13 +208,16 @@ def update_request(
     session.commit()
     requester = session.get(PortalUser, item.portal_user_id)
     if requester and requester.telegram_id:
-        labels = {"accepted": "已接受", "available": "已入库", "rejected": "已拒绝"}
         enqueue_notification(
             session,
             dedupe_key=f"media-request-status:{item.id}:{payload.status}",
             telegram_id=requester.telegram_id,
             kind="media_request_status",
-            message=f"你的请求《{item.title}》状态更新为：{labels[payload.status]}。",
+            message=(
+                "您的工单已受理，请等待管理员处理。详细信息请到 Web 端查看。"
+                if payload.status == "accepted"
+                else "您的工单已经处理。详细信息请到 Web 端查看。"
+            ),
         )
     return {"item": _serialize_request(session, item)}
 

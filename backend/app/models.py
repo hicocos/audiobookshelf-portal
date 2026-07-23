@@ -30,6 +30,7 @@ class PortalUser(SQLModel, table=True):
     telegram_id: str | None = Field(default=None, index=True)
     telegram_username: str | None = None
     telegram_bound_at: datetime | None = None
+    telegram_binding_required: bool = False
     session_version: int = 0
     password_changed_at: datetime | None = None
     role: str = "user"

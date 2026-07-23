@@ -9,9 +9,9 @@ from app.handlers import (
     build_help_keyboard,
     build_main_keyboard,
     build_panel_inline_keyboard,
-    build_request_type_keyboard,
     format_bind_success,
     format_help,
+    format_media_requests,
     format_panel,
     format_recent_listening,
     format_request_notice,
@@ -22,9 +22,24 @@ from app.handlers import (
     parse_bind_code,
     parse_register_args,
 )
-from app.admin_handlers import _admin_keyboard, _user_keyboard
-from app.user_handlers import _load_panel_data, _panel_keyboard, start
-from app.main import build_command_menu
+from app.admin_handlers import (
+    _admin_keyboard,
+    _format_request,
+    _format_request_list,
+    _format_stats,
+    _request_keyboard,
+    _request_list_keyboard,
+    _user_keyboard,
+)
+from app.user_handlers import (
+    _load_panel_data,
+    _panel_keyboard,
+    parse_audiobook_request,
+    request_command,
+    search_command,
+    start,
+)
+from app.main import build_command_menu, requires_group_membership
 
 
 def test_parse_bind_code_requires_code():
@@ -144,6 +159,159 @@ def test_command_menu_exposes_supported_account_capabilities():
     assert all(isinstance(item, BotCommand) for item in commands)
     names = {item.command for item in commands}
     assert {"me", "renew", "reset_password", "checkin", "points", "referral", "requests"} <= names
+    descriptions = {item.command: item.description for item in commands}
+    assert descriptions["request"] == "求有声书"
+    assert descriptions["requests"] == "查看有声书工单"
+
+
+def test_binding_entry_points_bypass_group_gate_but_user_features_do_not():
+    assert requires_group_membership("start") is False
+    assert requires_group_membership("bind") is False
+    assert requires_group_membership("register") is False
+    assert requires_group_membership("help") is False
+    assert requires_group_membership("checkin") is True
+    assert requires_group_membership("request") is True
+
+
+@pytest.mark.asyncio
+async def test_request_command_enters_single_audiobook_flow(monkeypatch):
+    started = {}
+
+    async def fake_begin(context, telegram_id, mode):
+        started.update(telegram_id=telegram_id, mode=mode)
+
+    class Message:
+        reply = None
+
+        async def reply_text(self, text, *, reply_markup):
+            self.reply = (text, reply_markup)
+
+    monkeypatch.setattr("app.user_handlers._begin_local_input", fake_begin)
+    message = Message()
+    update = type(
+        "Update",
+        (),
+        {
+            "effective_user": type("User", (), {"id": 123, "username": "alice"})(),
+            "effective_message": message,
+        },
+    )()
+    context = type("Context", (), {"args": [], "user_data": {}})()
+
+    await request_command(update, context)
+
+    assert started == {"telegram_id": 123, "mode": "request_audiobook"}
+    assert "求有声书" in message.reply[0]
+    assert "播客" not in message.reply[0]
+    buttons = [
+        button
+        for row in message.reply[1].inline_keyboard
+        for button in row
+    ]
+    assert [button.text for button in buttons] == ["取消"]
+
+
+@pytest.mark.asyncio
+async def test_search_callback_without_command_args_enters_search_flow(monkeypatch):
+    started = {}
+
+    async def fake_begin(context, telegram_id, mode):
+        started.update(telegram_id=telegram_id, mode=mode)
+
+    class Message:
+        reply = None
+
+        async def reply_text(self, text, *, reply_markup):
+            self.reply = (text, reply_markup)
+
+    monkeypatch.setattr("app.user_handlers._begin_local_input", fake_begin)
+    message = Message()
+    update = type("Update", (), {
+        "effective_user": type("User", (), {"id": 123, "username": "alice"})(),
+        "effective_message": message,
+    })()
+    context = type("Context", (), {"args": None, "user_data": {}})()
+
+    await search_command(update, context)
+
+    assert started == {"telegram_id": 123, "mode": "library_search"}
+    assert "搜索有声书" in message.reply[0]
+
+
+@pytest.mark.asyncio
+async def test_blank_audiobook_request_keeps_input_flow_active(monkeypatch):
+    cancelled: list[int] = []
+
+    async def fake_flow(_telegram_id):
+        return {"active": True, "kind": "input", "step": "request_audiobook"}
+
+    async def fake_cancel(telegram_id):
+        cancelled.append(telegram_id)
+        return {"cleared": True}
+
+    class Message:
+        text = "   "
+        reply = None
+
+        async def reply_text(self, text, *, reply_markup):
+            self.reply = (text, reply_markup)
+
+    monkeypatch.setattr("app.user_handlers.API.flow", fake_flow)
+    monkeypatch.setattr("app.user_handlers.API.cancel_flow", fake_cancel)
+    message = Message()
+    update = type(
+        "Update",
+        (),
+        {
+            "effective_user": type("User", (), {"id": 123, "username": "alice"})(),
+            "effective_message": message,
+        },
+    )()
+    context = type("Context", (), {"user_data": {"input_mode": "request_audiobook"}})()
+
+    from app.user_handlers import text_menu
+
+    await text_menu(update, context)
+
+    assert cancelled == []
+    assert context.user_data["input_mode"] == "request_audiobook"
+    assert "信息不完整" in message.reply[0]
+
+
+@pytest.mark.asyncio
+async def test_admin_request_reply_flow_survives_missing_local_context(monkeypatch):
+    handled = {}
+
+    async def fake_flow(_telegram_id):
+        return {
+            "active": True,
+            "kind": "input",
+            "step": "admin_request_reply:req-123",
+        }
+
+    async def fake_reply(update, context, request_id, text):
+        handled.update(request_id=request_id, text=text)
+
+    class Message:
+        text = "请补充作者信息"
+
+    monkeypatch.setattr("app.user_handlers.API.flow", fake_flow)
+    monkeypatch.setattr("app.admin_handlers.handle_admin_request_reply", fake_reply)
+    update = type(
+        "Update",
+        (),
+        {
+            "effective_user": type("User", (), {"id": 123, "username": "admin"})(),
+            "effective_message": Message(),
+        },
+    )()
+    context = type("Context", (), {"user_data": {}})()
+
+    from app.user_handlers import text_menu
+
+    await text_menu(update, context)
+
+    assert handled == {"request_id": "req-123", "text": "请补充作者信息"}
 
 
 @pytest.mark.asyncio
@@ -331,17 +499,15 @@ def test_search_results_and_request_notice():
     assert "演播者" in text
 
     notice = format_request_notice()
-    assert "有声书或播客" in notice
-    assert "作品名称、作者或主播" in notice
-    assert "只针对处理喜马拉雅" not in notice
-
-    request_labels = [
-        button.text
-        for row in build_request_type_keyboard().inline_keyboard
-        for button in row
-    ]
-    assert "📕 有声书" in request_labels
-    assert "🎙 播客" in request_labels
+    assert "目前仅提供喜马拉雅 FM 上的资源" in notice
+    assert "请提供详细信息，否则不予处理" in notice
+    assert "包括但不限于" in notice
+    assert "平台：" in notice
+    assert "作品名称：" in notice
+    assert "演播者：" in notice
+    assert "是否完结：" in notice
+    assert "目前集数：" in notice
+    assert "播客" not in notice
 
     community_labels = [
             button.text
@@ -353,7 +519,20 @@ def test_search_results_and_request_notice():
             ).inline_keyboard
         for button in row
     ]
-    assert "📮 求书 / 播客" in community_labels
+    assert "📮 求有声书" in community_labels
+    assert not any("播客" in label for label in community_labels)
+
+    history = format_media_requests(
+        {
+            "items": [
+                {"kind": "book", "title": "三体", "status": "pending"},
+                {"kind": "podcast", "title": "旧工单", "status": "accepted"},
+            ]
+        }
+    )
+    assert "三体" in history
+    assert "旧工单" in history
+    assert "播客" not in history
 
 
 def test_admin_panel_requires_explicit_admin_visibility_and_admin_account():
@@ -450,10 +629,15 @@ def test_admin_panel_prioritizes_actionable_lists_over_user_search():
     ]
     assert "👥 用户查询" not in labels
     assert "🎟️ 生成卡密" not in labels
-    assert "📮 工单管理" in labels
-    assert "⏰ 7天内到期" in labels
-    assert "🟠 已到期" in labels
-    assert "⛔ 已停用" in labels
+    assert labels == ["📮 工单管理", "🔄 刷新工单"]
+
+    stats = _format_stats({"pendingRequests": 3})
+    assert "Telegram 工单管理" in stats
+    assert "待处理工单：3" in stats
+    assert "正常用户" not in stats
+    assert "到期用户" not in stats
+    assert "群组宽限" not in stats
+    assert "定时任务" not in stats
 
     action_labels = [
         button.text
@@ -465,3 +649,64 @@ def test_admin_panel_prioritizes_actionable_lists_over_user_search():
     assert "⏳ +7天" in action_labels
     assert "⏳ +30天" in action_labels
     assert "⛔ 停用" in action_labels
+
+
+def test_admin_request_card_is_human_readable_and_has_three_actions():
+    item = {
+        "id": "req-123",
+        "username": "alice",
+        "title": "斗破苍穹",
+        "details": "平台：喜马拉雅 FM\n演播者：暮玖\n是否完结：否\n目前集数：1200",
+        "status": "pending",
+        "createdAt": "2026-07-19T06:00:00Z",
+    }
+    text = _format_request(item)
+    assert "工单编号：req-123" in text
+    assert "提交用户：alice" in text
+    assert "作品名称：斗破苍穹" in text
+    assert "状态：待处理" in text
+    assert "pending" not in text
+
+    buttons = [
+        button for row in _request_keyboard("req-123").inline_keyboard for button in row
+    ]
+    assert [button.text for button in buttons] == ["✅ 接受请求", "💬 回复工单", "🏁 结束工单"]
+    assert [button.callback_data for button in buttons] == [
+        "adm_req:accepted:req-123",
+        "adm_req_reply:req-123",
+        "adm_req:available:req-123",
+    ]
+
+
+def test_audiobook_request_accepts_free_form_content():
+    assert parse_audiobook_request("333366") == ("333366", None)
+    assert parse_audiobook_request(
+        "平台：喜马拉雅 FM\n作品名称：斗破苍穹\n演播者：暮玖\n是否完结：否\n目前集数：1200"
+    ) == (
+        "斗破苍穹",
+        "平台：喜马拉雅 FM\n演播者：暮玖\n是否完结：否\n目前集数：1200",
+    )
+    assert parse_audiobook_request("平台：蜻蜓 FM\n作品名称：斗破苍穹") == (
+        "斗破苍穹",
+        "平台：蜻蜓 FM",
+    )
+
+
+def test_admin_request_list_is_one_compact_message_with_selection_buttons():
+    items = [
+        {"id": "req-1", "username": "alice", "title": "斗破苍穹", "status": "pending"},
+        {"id": "req-2", "username": "bob", "title": "三体", "status": "accepted"},
+    ]
+    text = _format_request_list(items)
+    assert "待处理工单（2）" in text
+    assert "1. [待处理] 斗破苍穹 · alice" in text
+    assert "2. [已接受] 三体 · bob" in text
+
+    buttons = [
+        button for row in _request_list_keyboard(items).inline_keyboard for button in row
+    ]
+    assert [button.text for button in buttons] == ["1 · 斗破苍穹", "2 · 三体", "🔄 刷新工单"]
+    assert [button.callback_data for button in buttons[:2]] == [
+        "adm_req_view:req-1",
+        "adm_req_view:req-2",
+    ]

@@ -28,8 +28,8 @@ logger = logging.getLogger(__name__)
 
 
 class RegisterRequest(BaseModel):
-    username: str = Field(min_length=3, max_length=64, pattern=r"^[a-zA-Z0-9_.-]+$")
-    password: str = Field(min_length=1, max_length=256)
+    username: str = Field(min_length=3, max_length=18, pattern=r"^[a-zA-Z0-9_.-]+$")
+    password: str = Field(min_length=1, max_length=18)
     inviteCode: str = Field(min_length=3, max_length=128)
     email: str | None = None
 
@@ -52,6 +52,8 @@ def _aware_expiry(user: PortalUser):
 
 
 def is_user_expired(user: PortalUser) -> bool:
+    if user.status == "pending" and user.telegram_binding_required and not user.telegram_id:
+        return False
     expires_at = _aware_expiry(user)
     return bool(expires_at and expires_at <= utcnow())
 
@@ -66,6 +68,7 @@ def public_user(user: PortalUser) -> dict[str, Any]:
         "status": user.status,
         "expiresAt": expires_at.isoformat() if expires_at else None,
         "telegramBound": bool(user.telegram_id),
+        "telegramBindingRequired": bool(user.telegram_binding_required),
         "telegramUsername": user.telegram_username,
         "telegramBoundAt": telegram_bound_at.isoformat() if telegram_bound_at else None,
     }
@@ -178,7 +181,7 @@ async def register(
                 username=payload.username,
                 password=payload.password,
                 permissions=default_abs_permissions(),
-                is_active=True,
+                is_active=False,
             )
     except (httpx.HTTPError, TypeError, RuntimeError, KeyError) as exc:
         session.rollback()
@@ -195,6 +198,8 @@ async def register(
         abs_user_id=abs_user["id"],
         abs_username=abs_user.get("username", payload.username),
         expires_at=expires_at,
+        status="pending",
+        telegram_binding_required=True,
     )
     session.add(user)
     try:

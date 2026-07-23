@@ -235,7 +235,6 @@ class InternalApi:
         self,
         telegram_id: int,
         *,
-        kind: str,
         title: str,
         details: str | None,
     ) -> dict[str, Any]:
@@ -244,7 +243,6 @@ class InternalApi:
             "/api/internal/tg/requests",
             json={
                 "telegramId": str(telegram_id),
-                "kind": kind,
                 "title": title,
                 "details": details,
             },

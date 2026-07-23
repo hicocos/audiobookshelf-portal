@@ -50,6 +50,11 @@ def required_group_handler(handler: BotHandler, api: InternalApi) -> BotHandler:
         if user is None or str(user.id) in _admin_ids():
             await handler(update, context)
             return
+        callback_data = str(getattr(update.callback_query, "data", "") or "")
+        message_text = str(getattr(update.effective_message, "text", "") or "").strip().upper()
+        if callback_data == "bind_start" or message_text.startswith("TG-"):
+            await handler(update, context)
+            return
         try:
             config = await _config(api)
         except httpx.HTTPError:
@@ -71,18 +76,8 @@ def required_group_handler(handler: BotHandler, api: InternalApi) -> BotHandler:
         except TelegramError:
             await update.effective_message.reply_text("群组资格暂时无法验证，请联系管理员检查 Bot 权限。")
             return
-        report = await api.report_membership(user.id, group_id=group_id, is_member=is_member)
+        await api.report_membership(user.id, group_id=group_id, is_member=is_member)
         if is_member:
-            await handler(update, context)
-            return
-        if report.get("bound") and report.get("status") == "grace":
-            warning_key = f"group-warning:{user.id}"
-            last_warning = float(context.bot_data.get(warning_key, 0))
-            if time.time() - last_warning > 3600:
-                context.bot_data[warning_key] = time.time()
-                await update.effective_message.reply_text(
-                    f"你当前不在必需群组，宽限期至 {report.get('graceExpiresAt')}。请尽快重新加入。"
-                )
             await handler(update, context)
             return
         invite_url = str(config.get("inviteUrl") or "")

@@ -39,9 +39,9 @@ help, and one-time password-reset links. Registration and renewal conversations 
 stored in the portal database, so a Bot restart does not lose an active flow.
 
 For bound regular users, `/start` shows at most two recent listening entries and
-offers library search. The existing media-request flow is unchanged; its entry
-prompt reminds users that current audiobook processing targets Ximalaya FM and asks
-them to include the title, narrator, and current episode count.
+offers library search. The media-request flow accepts audiobook requests through a
+single entry point and asks users to include the title, author, narrator, version,
+and any useful link.
 
 All service runtimes, logs, Bot messages, and Web date displays use
 `Asia/Shanghai`. Database timestamps and API transport values remain UTC internally

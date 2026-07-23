@@ -3,6 +3,7 @@ from typing import Any
 
 import httpx
 from telegram import Update
+from telegram.error import TimedOut
 from telegram.ext import ContextTypes
 
 from app.config import BotSettings
@@ -18,7 +19,6 @@ from app.handlers import (
     build_redeem_confirm_keyboard,
     build_redeem_keyboard,
     build_register_confirm_keyboard,
-    build_request_type_keyboard,
     build_renew_confirm_keyboard,
     dashboard_url,
     format_bind_prompt,
@@ -498,7 +498,7 @@ async def _search_value(update: Update, query: str) -> None:
 
 
 async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    query = " ".join(context.args).strip()
+    query = " ".join(context.args or []).strip()
     if query:
         await _search_value(update, query)
         return
@@ -511,43 +511,44 @@ async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 
 async def request_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    raw = " ".join(context.args).strip()
-    if not raw or " " not in raw:
+    raw = " ".join(context.args or []).strip()
+    if not raw:
+        telegram_id, _username = telegram_identity(update)
+        await _begin_local_input(context, telegram_id, "request_audiobook")
         await update.effective_message.reply_text(
-            "📮 想提交哪一类内容？\n\n" + format_request_notice(),
-            reply_markup=build_request_type_keyboard(),
+            "📮 求有声书\n\n" + format_request_notice(),
+            reply_markup=build_cancel_keyboard(),
         )
         return
-    kind_value, body = raw.split(" ", 1)
-    kinds = {"book": "book", "书": "book", "podcast": "podcast", "播客": "podcast"}
-    kind = kinds.get(kind_value.casefold())
-    if kind is None:
-        await update.effective_message.reply_text("类型只能是 book 或 podcast。")
+    body = raw
+    # Accept the old command syntax from previously published help text, but
+    # normalize every new ticket to the single audiobook request flow.
+    legacy_kind, separator, legacy_body = raw.partition(" ")
+    if separator and legacy_kind.casefold() in {"book", "书", "podcast", "播客"}:
+        body = legacy_body
+    parsed = parse_audiobook_request(body.replace("|", "\n", 1))
+    if parsed is None:
+        await update.effective_message.reply_text(
+            "信息不完整或平台不支持，请按提示格式完整填写喜马拉雅 FM 资源信息。"
+        )
         return
-    title, separator, details = body.partition("|")
-    if not title.strip():
-        await update.effective_message.reply_text("请填写作品标题。")
-        return
+    title, details = parsed
     await _submit_media_request(
         update,
-        kind=kind,
-        title=title.strip(),
-        details=details.strip() if separator else None,
+        title=title,
+        details=details,
     )
 
 
 async def _submit_media_request(
     update: Update,
     *,
-    kind: str,
     title: str,
     details: str | None,
 ) -> None:
     telegram_id, _username = telegram_identity(update)
     try:
-        data = await API.create_media_request(
-            telegram_id, kind=kind, title=title, details=details
-        )
+        data = await API.create_media_request(telegram_id, title=title, details=details)
         item = data.get("item") or {}
         await update.effective_message.reply_text(
             f"✅ 工单已提交\n\n{item.get('title')}\n状态：待处理",
@@ -558,6 +559,39 @@ async def _submit_media_request(
             http_error_detail(exc, "工单提交失败。"),
             reply_markup=build_home_keyboard(),
         )
+
+
+def parse_audiobook_request(text: str) -> tuple[str, str | None] | None:
+    cleaned = text.strip()
+    if not cleaned:
+        return None
+    fields: dict[str, str] = {}
+    aliases = {
+        "平台": "platform",
+        "作品名称": "title",
+        "名字": "title",
+        "演播者": "narrator",
+        "是否完结": "completed",
+        "目前集数": "episodes",
+    }
+    for raw_line in cleaned.splitlines():
+        key, separator, value = raw_line.strip().replace("：", ":", 1).partition(":")
+        normalized = aliases.get(key.strip())
+        if separator and normalized and value.strip():
+            fields[normalized] = value.strip()
+    title = fields.get("title") or cleaned.splitlines()[0].strip()
+    detail_lines: list[str] = []
+    for label, key in (
+        ("平台", "platform"),
+        ("演播者", "narrator"),
+        ("是否完结", "completed"),
+        ("目前集数", "episodes"),
+    ):
+        if fields.get(key):
+            detail_lines.append(f"{label}：{fields[key]}")
+    if not fields.get("title") and len(cleaned.splitlines()) > 1:
+        detail_lines.extend(line.strip() for line in cleaned.splitlines()[1:] if line.strip())
+    return title, "\n".join(detail_lines) or None
 
 
 async def requests_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -596,7 +630,18 @@ async def text_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     input_mode = (
         step
-        if step in {"request_book", "request_podcast", "library_search", "redeem_days"}
+        if isinstance(step, str)
+        and (
+            step
+            in {
+                "request_audiobook",
+                "request_book",
+                "request_podcast",
+                "library_search",
+                "redeem_days",
+            }
+            or step.startswith("admin_request_reply:")
+        )
         else context.user_data.get(INPUT_MODE_KEY)
     )
     if isinstance(input_mode, str) and input_mode.startswith("admin_request_reply:"):
@@ -605,21 +650,21 @@ async def text_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         request_id = input_mode.partition(":")[2]
         await handle_admin_request_reply(update, context, request_id, text)
         return
-    if input_mode in {"request_book", "request_podcast"}:
-        context.user_data.pop(INPUT_MODE_KEY, None)
-        await API.cancel_flow(telegram_id)
-        title, separator, details = text.partition("\n")
-        if not title.strip():
+    if input_mode in {"request_audiobook", "request_book", "request_podcast"}:
+        parsed = parse_audiobook_request(text)
+        if parsed is None:
             await update.effective_message.reply_text(
-                "标题不能为空，请重新选择内容类型。",
-                reply_markup=build_request_type_keyboard(),
+                "信息不完整或平台不支持。请完整填写平台、作品名称、演播者、是否完结和目前集数；目前仅处理喜马拉雅 FM 资源。",
+                reply_markup=build_cancel_keyboard(),
             )
             return
+        title, details = parsed
+        context.user_data.pop(INPUT_MODE_KEY, None)
+        await API.cancel_flow(telegram_id)
         await _submit_media_request(
             update,
-            kind="book" if input_mode == "request_book" else "podcast",
-            title=title.strip(),
-            details=details.strip() if separator and details.strip() else None,
+            title=title,
+            details=details,
         )
         return
     if input_mode == "library_search":
@@ -664,6 +709,8 @@ async def text_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "最近收听": recent_command,
         "🔍 搜索有声书": search_command,
         "搜索有声书": search_command,
+        "📮 有声书工单": requests_command,
+        "有声书工单": requests_command,
         "📮 求书工单": requests_command,
         "求书工单": requests_command,
         "🎁 邀请好友": referral_command,
@@ -690,7 +737,10 @@ async def callback_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     query = update.callback_query
     if query is None:
         return
-    await query.answer()
+    try:
+        await query.answer()
+    except TimedOut:
+        logger.warning("Telegram callback acknowledgement timed out; continuing action")
     action = query.data or ""
     telegram_id, username = telegram_identity(update)
     if action.startswith("adm_"):
@@ -732,19 +782,20 @@ async def callback_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             )
         else:
             await query.message.reply_text(
-                "🎁 积分与社区\n\n签到、积分、好友邀请和求书都在这里。",
+                "🎁 积分与社区\n\n签到、积分、好友邀请和求有声书都在这里。",
                 reply_markup=build_community_keyboard(fresh),
             )
     elif action == "request_start":
+        await _begin_local_input(context, telegram_id, "request_audiobook")
         await query.message.reply_text(
-            "📮 想提交哪一类内容？\n\n" + format_request_notice(),
-            reply_markup=build_request_type_keyboard(),
+            "📮 求有声书\n\n" + format_request_notice(),
+            reply_markup=build_cancel_keyboard(),
         )
+    # Keep callbacks from old inline keyboards functional after deployment.
     elif action in {"request_book", "request_podcast"}:
-        await _begin_local_input(context, telegram_id, action)
-        label = "有声书" if action == "request_book" else "播客"
+        await _begin_local_input(context, telegram_id, "request_audiobook")
         await query.message.reply_text(
-            f"📮 提交{label}\n\n请发送标题。\n如需补充说明，可从第二行开始填写。",
+            "📮 求有声书\n\n" + format_request_notice(),
             reply_markup=build_cancel_keyboard(),
         )
     elif action == "recent":

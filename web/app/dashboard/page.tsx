@@ -6,7 +6,7 @@ import {
   BookPlus, CalendarRange, Clock, Compass, Copy, Download, Gift, Headphones, KeyRound, LinkIcon, ListMusic,
   LogOut, Monitor, RefreshCcw, Send, ShieldCheck, Smartphone, Sparkles, Ticket, UserRound,
 } from 'lucide-react';
-import { ReactNode, useEffect, useMemo, useState } from 'react';
+import { ReactNode, useEffect, useMemo, useRef, useState } from 'react';
 import { NavDrawer } from '@/components/nav-drawer';
 import { AccessibleModal } from '@/components/accessible-modal';
 import { Button, LoadingScreen, Panel, PromptModal, SectionHeader, Sheet, ShellBackdrop, Stat, StatusNote, WordMark, AnnouncementBanner } from '@/components/ui';
@@ -15,6 +15,7 @@ import {
   PublicSettings, ReferralRecord, RewardSummary, TelegramBindTokenResponse, UserCapabilities,
 } from '@/lib/api';
 import { formatShanghaiDateTime } from '@/lib/datetime';
+import { idempotencyAttempt, IdempotencyAttempt } from '@/lib/idempotency';
 
 const statusText: Record<string, string> = { active: '正常', expired: '已到期', disabled: '已停用', deleted: '需处理', pending: '待启用' };
 const statusHelp: Record<string, string> = {
@@ -26,7 +27,7 @@ const statusHelp: Record<string, string> = {
 };
 const roleText: Record<string, string> = { user: '用户', admin: '管理员', root: '超级管理员' };
 const rewardKindText: Record<string, string> = { daily_checkin: '每日签到', referral_reward: '邀请奖励', redeem_expiry_days: '兑换有效期', admin_adjustment: '管理员调整' };
-const requestStatusText: Record<string, string> = { pending: '待处理', accepted: '已受理', available: '已上架', rejected: '未采纳' };
+const requestStatusText: Record<string, string> = { pending: '待处理', accepted: '已受理', available: '已上架', rejected: '未采纳', cancelled: '已撤销' };
 const fallbackSettings: PublicSettings = {
   siteName: 'MoYin.CC', tagline: '安静的声音栖地', registrationEnabled: true, passwordMinLength: 3,
   copy: { heroKicker: 'AUDIO ISLAND', heroTitle: 'MoYin.CC', heroSubtitle: '安静的声音栖地', primaryCta: '申请访问', secondaryCta: '进入账号中心', notice: '一个轻量、安静、专注的音频内容入口。' },
@@ -54,7 +55,9 @@ export default function DashboardPage() {
   const [leaderboard, setLeaderboard] = useState<LeaderboardEntry[]>([]);
   const [requests, setRequests] = useState<MediaRequestRecord[]>([]);
   const [redeemDays, setRedeemDays] = useState(1);
-  const [requestForm, setRequestForm] = useState<{ kind: 'book' | 'podcast'; title: string; details: string }>({ kind: 'book', title: '', details: '' });
+  const redeemAttemptRef = useRef<IdempotencyAttempt | null>(null);
+  const redeemInFlightRef = useRef(false);
+  const [requestForm, setRequestForm] = useState<{ title: string; details: string }>({ title: '', details: '' });
   const [featureBusy, setFeatureBusy] = useState('');
   const [code, setCode] = useState('');
   const [message, setMessage] = useState('');
@@ -71,6 +74,7 @@ export default function DashboardPage() {
   const [tgBindToken, setTgBindToken] = useState<TelegramBindTokenResponse | null>(null);
   const [tgSaving, setTgSaving] = useState(false);
   const [tgUnbindConfirm, setTgUnbindConfirm] = useState(false);
+  const [requestAction, setRequestAction] = useState<{ item: MediaRequestRecord; action: 'cancel' | 'delete' } | null>(null);
   const minPwLength = settings?.passwordMinLength ?? 1;
   const siteName = settings?.siteName || 'MoYin.CC';
   const serverAddress = settings?.client?.serverUrl || fallbackSettings.client.serverUrl;
@@ -129,6 +133,11 @@ export default function DashboardPage() {
   }
   useEffect(() => { void loadAll(); }, []);
   useEffect(() => {
+    const requested = new URLSearchParams(window.location.search).get('tab');
+    if (requested && ['account', 'rewards', 'requests', 'guide', 'records'].includes(requested)) {
+      setTab(requested as Tab);
+      return;
+    }
     const saved = window.sessionStorage.getItem('moyin-dashboard-tab');
     if (saved && ['account', 'rewards', 'requests', 'guide', 'records'].includes(saved)) setTab(saved as Tab);
   }, []);
@@ -256,8 +265,14 @@ export default function DashboardPage() {
     setMessage('');
     try {
       const result = await api.checkin();
-      setRewards(await api.rewards());
-      setMessage(result.alreadyCheckedIn ? `今天已经签到，当前连续 ${result.streak} 天。` : `签到成功，获得 ${result.pointsAwarded} 积分。`);
+      setPopup(result.alreadyCheckedIn
+        ? { title: '今天已经签到', body: `当前连续签到 ${result.streak} 天。` }
+        : { title: '签到成功', body: `获得 ${result.pointsAwarded} 积分，当前连续签到 ${result.streak} 天。` });
+      try {
+        setRewards(await api.rewards());
+      } catch {
+        setRewards((current) => current ? { ...current, balance: result.balance, streak: result.streak, lastCheckinDate: result.date } : current);
+      }
     } catch (error) {
       setMessage(error instanceof Error ? error.message : '签到失败。');
     } finally {
@@ -266,16 +281,22 @@ export default function DashboardPage() {
   }
 
   async function redeemRewardDays() {
+    if (redeemInFlightRef.current) return;
+    redeemInFlightRef.current = true;
+    const attempt = idempotencyAttempt(redeemAttemptRef.current, `redeem:${redeemDays}`);
+    redeemAttemptRef.current = attempt;
     setFeatureBusy('redeem-points');
     setMessage('');
     try {
-      const result = await api.redeemPoints(redeemDays, crypto.randomUUID());
+      const result = await api.redeemPoints(redeemDays, attempt.key);
       setRewards(await api.rewards());
       setUser((current) => current ? { ...current, expiresAt: result.expiresAt, status: 'active' } : current);
+      redeemAttemptRef.current = null;
       setPopup({ title: '积分兑换成功', body: `已用 ${result.cost} 积分兑换 ${result.days} 天，有效期已同步到媒体账号。` });
     } catch (error) {
       setMessage(error instanceof Error ? error.message : '积分兑换失败。');
     } finally {
+      redeemInFlightRef.current = false;
       setFeatureBusy('');
     }
   }
@@ -322,10 +343,45 @@ export default function DashboardPage() {
     try {
       const result = await api.createMediaRequest({ ...requestForm, title: requestForm.title.trim(), details: requestForm.details.trim() || undefined });
       setRequests((current) => [result.item, ...current]);
-      setRequestForm({ kind: 'book', title: '', details: '' });
+      setRequestForm({ title: '', details: '' });
       setMessage('请求已提交，处理状态会显示在本页。');
     } catch (error) {
       setMessage(error instanceof Error ? error.message : '请求提交失败。');
+    } finally {
+      setFeatureBusy('');
+    }
+  }
+
+  async function refreshMediaRequests() {
+    setFeatureBusy('request-refresh');
+    setMessage('');
+    try {
+      setRequests((await api.mediaRequests()).items);
+    } catch {
+      setMessage('请求列表刷新失败，请稍后重试。');
+    } finally {
+      setFeatureBusy('');
+    }
+  }
+
+  async function runRequestAction() {
+    if (!requestAction) return;
+    const { item, action } = requestAction;
+    setRequestAction(null);
+    setFeatureBusy(`request-${action}-${item.id}`);
+    setMessage('');
+    try {
+      if (action === 'cancel') {
+        const result = await api.cancelMediaRequest(item.id);
+        setRequests((current) => current.map((entry) => entry.id === item.id ? result.item : entry));
+        setPopup({ title: '请求已撤销', body: '该请求已停止处理，现在可以从列表中删除。' });
+      } else {
+        await api.deleteMediaRequest(item.id);
+        setRequests((current) => current.filter((entry) => entry.id !== item.id));
+        setPopup({ title: '请求已删除', body: '该条请求记录已从你的列表中删除。' });
+      }
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : action === 'cancel' ? '请求撤销失败。' : '请求删除失败。');
     } finally {
       setFeatureBusy('');
     }
@@ -352,6 +408,7 @@ export default function DashboardPage() {
   );
   const nextStep = useMemo(() => {
     if (!user) return { title: '读取账号状态中', body: '稍等片刻，账号中心会显示下一步建议。', action: null as Tab | null };
+    if (user.telegramBindingRequired && !user.telegramBound) return { title: '请立即绑定 Telegram', body: '账号已创建但尚未启用。请在下方生成绑定码并打开 Bot 完成绑定。', action: 'account' as Tab };
     if (user.status === 'expired') return { title: '账号已到期', body: '先兑换续期码恢复访问；续期后再回到客户端收听。', action: 'account' as Tab };
     if (user.status === 'disabled' || user.status === 'deleted') return { title: '需要管理员处理', body: '账号暂不可用，请联系管理员确认媒体账号状态。', action: null as Tab | null };
     if (daysLeft !== null && daysLeft <= 7) return { title: '即将到期', body: '建议提前兑换续期码，避免客户端突然无法收听。', action: 'account' as Tab };
@@ -412,6 +469,10 @@ export default function DashboardPage() {
               </div>
             </Sheet>
 
+            {user?.telegramBindingRequired && !user.telegramBound && (
+              <StatusNote tone="warning">你的账号处于待启用状态：必须先绑定 Telegram Bot，完成后系统会自动启用听书权限。绑定前不会扣减有效期。</StatusNote>
+            )}
+
             <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
               <Info title="账号状态" value={user?.status ? statusText[user.status] || user.status : '-'} icon={<ShieldCheck size={16} />} />
               <Info title="账号角色" value={user?.role ? roleText[user.role] || user.role : '-'} icon={<UserRound size={16} />} />
@@ -470,7 +531,7 @@ export default function DashboardPage() {
             </div>
 
             <Sheet className="rounded-[20px] p-6 sm:p-8">
-              <SectionHeader eyebrow="Telegram" title="绑定 Telegram Bot" body="绑定后可在 Bot 中查看账号状态、媒体库摘要，并使用后续自助流程。绑定码只显示一次，10 分钟内有效。" />
+              <SectionHeader eyebrow="Telegram" title="绑定 Telegram Bot" body={user?.telegramBindingRequired ? '此账号必须绑定 Telegram Bot。绑定成功后会自动启用听书权限；绑定码只显示一次，10 分钟内有效。' : '绑定后可在 Bot 中查看账号状态、媒体库摘要，并使用后续自助流程。绑定码只显示一次，10 分钟内有效。'} />
               <div className="mt-6 space-y-4">
                 {user?.telegramBound ? (
                   <Panel className="rounded-[16px] p-5">
@@ -481,7 +542,7 @@ export default function DashboardPage() {
                           绑定时间：{user.telegramBoundAt ? formatShanghaiDateTime(user.telegramBoundAt) : '未知'}
                         </p>
                       </div>
-                      <Button variant="secondary" loading={tgSaving} loadingText="解绑中" onClick={() => setTgUnbindConfirm(true)}>解绑 Telegram</Button>
+                      {!user.telegramBindingRequired && <Button variant="secondary" loading={tgSaving} loadingText="解绑中" onClick={() => setTgUnbindConfirm(true)}>解绑 Telegram</Button>}
                     </div>
                   </Panel>
                 ) : (
@@ -489,7 +550,7 @@ export default function DashboardPage() {
                     <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
                       <div>
                         <p className="font-display font-semibold">尚未绑定 Telegram</p>
-                        <p className="mt-2 text-sm leading-6 text-[var(--muted-foreground)]">点击生成绑定码后，在 Telegram Bot 中发送命令即可完成绑定。不要把绑定码发给别人。</p>
+                        <p className="mt-2 text-sm leading-6 text-[var(--muted-foreground)]">{user?.telegramBindingRequired ? '请立即生成绑定码并打开 Telegram Bot 完成绑定；绑定成功后账号会自动启用。' : '点击生成绑定码后，在 Telegram Bot 中发送命令即可完成绑定。'} 不要把绑定码发给别人。</p>
                       </div>
                       <Button variant="claret" loading={tgSaving} loadingText="生成中" onClick={generateTelegramBindToken}>生成绑定码</Button>
                     </div>
@@ -515,9 +576,9 @@ export default function DashboardPage() {
               <div className="mt-6 grid gap-3 sm:grid-cols-3">
                 <input className="field" type="password" autoComplete="current-password" placeholder="当前密码"
                   value={pwCurrent} onChange={(e) => setPwCurrent(e.target.value)} />
-                <input className="field" type="password" autoComplete="new-password" placeholder={`新密码（至少 ${minPwLength} 位）`}
+                <input className="field" type="password" autoComplete="new-password" placeholder={`新密码（${minPwLength}–18 位）`} minLength={minPwLength} maxLength={18}
                   value={pwNext} onChange={(e) => setPwNext(e.target.value)} />
-                <input className="field" type="password" autoComplete="new-password" placeholder="确认新密码"
+                <input className="field" type="password" autoComplete="new-password" placeholder="确认新密码" maxLength={18}
                   value={pwConfirm} onChange={(e) => setPwConfirm(e.target.value)}
                   onKeyDown={(e) => { if (e.key === 'Enter') void changePassword(); }} />
               </div>
@@ -631,25 +692,29 @@ export default function DashboardPage() {
         {tab === 'requests' && showRequests && (
           <div className="space-y-5">
             <Sheet className="rounded-[22px] p-6 sm:p-9">
-              <SectionHeader eyebrow="内容请求" title="求书 / 播客" body="提交想听的有声书或播客。最多同时保留 3 个待处理请求，管理员处理后状态会在这里更新。" />
-              <div className="mt-7 grid gap-4 lg:grid-cols-[.35fr_1fr]">
-                <label><span className="mb-2 block text-sm font-black">请求类型</span><select className="field" value={requestForm.kind} onChange={(event) => setRequestForm({ ...requestForm, kind: event.target.value as 'book' | 'podcast' })}>
-                  <option value="book">有声书</option><option value="podcast">播客</option>
-                </select></label>
+              <SectionHeader eyebrow="内容请求" title="求有声书" body="提交想听的有声书。最多同时保留 3 个待处理请求，管理员处理后状态会在这里更新。" />
+              <div className="mt-7">
                 <label><span className="mb-2 block text-sm font-black">作品名称</span><input className="field" placeholder="必填" value={requestForm.title} onChange={(event) => setRequestForm({ ...requestForm, title: event.target.value })} /></label>
               </div>
-              <label className="mt-4 block"><span className="mb-2 block text-sm font-black">补充信息（可选）</span><textarea className="field min-h-28" placeholder="作者、主播、版本、链接等" value={requestForm.details} onChange={(event) => setRequestForm({ ...requestForm, details: event.target.value })} /></label>
+              <label className="mt-4 block"><span className="mb-2 block text-sm font-black">补充信息（可选）</span><textarea className="field min-h-28" placeholder="作者、演播者、版本、链接等" value={requestForm.details} onChange={(event) => setRequestForm({ ...requestForm, details: event.target.value })} /></label>
               <div className="mt-4 flex justify-end"><Button variant="claret" loading={featureBusy === 'request'} loadingText="提交中" onClick={submitMediaRequest}><BookPlus size={16} /> 提交请求</Button></div>
             </Sheet>
 
             <Sheet className="rounded-[20px] p-6 sm:p-8">
-              <div className="flex items-center justify-between gap-4"><h3 className="font-display text-xl font-semibold">我的请求</h3><Button variant="secondary" onClick={async () => setRequests((await api.mediaRequests()).items)}><RefreshCcw size={15} /> 刷新</Button></div>
+              <div className="flex items-center justify-between gap-4"><h3 className="font-display text-xl font-semibold">我的请求</h3><Button variant="secondary" loading={featureBusy === 'request-refresh'} loadingText="刷新中" onClick={refreshMediaRequests}><RefreshCcw size={15} /> 刷新</Button></div>
               <div className="mt-5 grid gap-3">
                 {requests.map((item) => (
                   <Panel key={item.id} className="rounded-[16px] p-5">
-                    <div className="flex flex-wrap items-start justify-between gap-3"><div><p className="font-display text-lg font-semibold">{item.title}</p><p className="mt-1 text-xs text-[var(--muted-foreground)]">{item.kind === 'book' ? '有声书' : '播客'} · {formatShanghaiDateTime(item.createdAt)}</p></div><span className="rounded-full tag-gold px-3 py-1 text-xs font-semibold">{requestStatusText[item.status] || item.status}</span></div>
+                    <div className="flex flex-wrap items-start justify-between gap-3"><div><p className="font-display text-lg font-semibold">{item.title}</p><p className="mt-1 text-xs text-[var(--muted-foreground)]">{formatShanghaiDateTime(item.createdAt)}</p></div><span className="rounded-full tag-gold px-3 py-1 text-xs font-semibold">{requestStatusText[item.status] || item.status}</span></div>
                     {item.details && <p className="mt-3 text-sm leading-6 text-[var(--muted-foreground)]">{item.details}</p>}
                     {item.adminNote && <p className="mt-3 rounded-xl bg-white/5 p-3 text-sm">管理员备注：{item.adminNote}</p>}
+                    <div className="mt-4 flex justify-end gap-2">
+                      {['pending', 'accepted'].includes(item.status) ? (
+                        <Button variant="secondary" loading={featureBusy === `request-cancel-${item.id}`} loadingText="撤销中" onClick={() => setRequestAction({ item, action: 'cancel' })}>撤销</Button>
+                      ) : (
+                        <Button variant="danger" loading={featureBusy === `request-delete-${item.id}`} loadingText="删除中" onClick={() => setRequestAction({ item, action: 'delete' })}>删除</Button>
+                      )}
+                    </div>
                   </Panel>
                 ))}
                 {!requests.length && <p className="py-8 text-center text-sm text-[var(--muted-foreground)]">还没有提交内容请求。</p>}
@@ -743,7 +808,7 @@ export default function DashboardPage() {
         items={[
           { key: 'account', label: '账号概览', description: '状态、续期与安全设置', icon: <UserRound size={19} /> },
           ...(showRewards ? [{ key: 'rewards' as const, label: '积分权益', description: '签到、兑换与好友邀请', icon: <Gift size={19} /> }] : []),
-          ...(showRequests ? [{ key: 'requests' as const, label: '内容请求', description: '求书、播客与处理进度', icon: <BookPlus size={19} />, badge: requests.filter((item) => ['pending', 'accepted'].includes(item.status)).length ? String(requests.filter((item) => ['pending', 'accepted'].includes(item.status)).length) : undefined }] : []),
+          ...(showRequests ? [{ key: 'requests' as const, label: '求有声书', description: '有声书请求与处理进度', icon: <BookPlus size={19} />, badge: requests.filter((item) => ['pending', 'accepted'].includes(item.status)).length ? String(requests.filter((item) => ['pending', 'accepted'].includes(item.status)).length) : undefined }] : []),
           { key: 'guide', label: '使用教程', description: '客户端安装与连接指南', icon: <Compass size={19} /> },
           ...(capabilities?.canListen ? [{ key: 'records' as const, label: '收听记录', description: '最近进度与媒体库', icon: <ListMusic size={19} /> }] : []),
         ]}
@@ -759,6 +824,16 @@ export default function DashboardPage() {
           <div className="mt-6 flex justify-end gap-3">
             <Button variant="secondary" onClick={() => setTgUnbindConfirm(false)}>取消</Button>
             <Button variant="danger" onClick={() => { setTgUnbindConfirm(false); void unbindTelegram(); }}>确认解绑</Button>
+          </div>
+        </AccessibleModal>
+      )}
+      {requestAction && (
+        <AccessibleModal title={requestAction.action === 'cancel' ? '确认撤销请求？' : '确认删除请求？'} onClose={() => setRequestAction(null)} overlayClassName="prompt-overlay" contentClassName="prompt-modal">
+          <h2 className="prompt-title">{requestAction.action === 'cancel' ? '确认撤销请求？' : '确认删除请求？'}</h2>
+          <p className="prompt-body">{requestAction.action === 'cancel' ? `撤销《${requestAction.item.title}》后，管理员将不再继续处理。` : `删除《${requestAction.item.title}》后，该记录无法恢复。`}</p>
+          <div className="mt-6 flex justify-end gap-3">
+            <Button variant="secondary" onClick={() => setRequestAction(null)}>取消</Button>
+            <Button variant={requestAction.action === 'delete' ? 'danger' : 'claret'} onClick={() => void runRequestAction()}>{requestAction.action === 'cancel' ? '确认撤销' : '确认删除'}</Button>
           </div>
         </AccessibleModal>
       )}
