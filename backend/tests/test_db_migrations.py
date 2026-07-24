@@ -96,6 +96,13 @@ def test_migrations_are_idempotent():
     assert "telegram_binding_required" in _columns(engine, "portal_users")
 
 
+def test_migrations_create_nullable_structured_audit_log_columns():
+    engine = _legacy_engine()
+    run_migrations(engine)
+    columns = _columns(engine, "audit_logs")
+    assert {"actor_user_id", "actor_username", "target_type", "target_id", "detail_json", "ip_address"}.issubset(columns)
+
+
 def test_migration_grandfathers_existing_accounts_out_of_required_binding():
     engine = _legacy_engine()
     with engine.begin() as conn:

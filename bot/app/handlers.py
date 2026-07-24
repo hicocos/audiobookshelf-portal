@@ -547,6 +547,9 @@ def format_media_requests(data: dict[str, Any]) -> str:
             f"- [{labels.get(str(item.get('status')), item.get('status'))}] "
             f"{escape(str(item.get('title') or ''))}"
         )
+        note = str(item.get("adminNote") or "").strip()
+        if note:
+            lines.append(f"  管理员备注：{escape(note)}")
     return "\n".join(lines)
 
 

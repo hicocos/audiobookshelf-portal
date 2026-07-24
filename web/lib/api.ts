@@ -53,6 +53,7 @@ export type PublicSettings = {
     requiredGroupId: string;
     requiredGroupInviteUrl: string;
     groupGraceHours: number;
+    botUsername?: string | null;
     requestsEnabled: boolean;
     checkinEnabled: boolean;
     pointsRedemptionEnabled: boolean;
@@ -136,6 +137,9 @@ export type TelegramBindTokenResponse = {
   expiresAt: string;
   botUsername: string | null;
   command: string;
+  bindingSessionId?: string;
+  attemptsRemaining?: number;
+  phase?: string;
 };
 
 export type CodeRecord = {
@@ -144,6 +148,7 @@ export type CodeRecord = {
   type: string;
   durationDays: number;
   maxUses: number;
+  perUserMaxUses: number;
   usedCount: number;
   status: string;
   expiresAt: string | null;
@@ -155,7 +160,7 @@ export type CodeRecord = {
 export type LibrarySummary = {
   libraries: Array<{ id: string; name: string; mediaType: string; icon?: string | null; lastScan?: string | null }>;
   items: Array<{ id: string; libraryId?: string | null; title: string; author?: string; narrator?: string; durationHours: number; numTracks: number; addedAt?: string | null }>;
-  progress: Array<{ id: string; libraryItemId?: string | null; title: string; author?: string; narrator?: string; mediaItemType: string; progressPercent: number; currentHours: number; durationHours: number; isFinished: boolean; lastUpdate?: string | null }>;
+  progress: Array<{ id: string; libraryItemId?: string | null; openUrl?: string | null; title: string; author?: string; narrator?: string; mediaItemType: string; progressPercent: number; currentHours: number; durationHours: number; isFinished: boolean; lastUpdate?: string | null }>;
   stats: { libraryCount: number; itemPreviewCount: number; progressCount: number };
 };
 
@@ -201,6 +206,7 @@ export type ReferralRecord = {
   code: string | null;
   expiresAt: string;
   rewardPoints: number;
+  status?: 'available' | 'used' | 'expired' | 'disabled';
   used: boolean;
   settledAt: string | null;
   createdAt: string;
@@ -234,6 +240,8 @@ export type AdminNotification = {
   message: string;
   status: string;
   attempts: number;
+  version: number;
+  claimedAt: string | null;
   lastError: string | null;
   createdAt: string;
   sentAt: string | null;
@@ -374,6 +382,13 @@ export class ApiError extends Error {
 }
 
 const DEFAULT_TIMEOUT_MS = 12_000;
+let sessionExpiredDispatched = false;
+
+function notifySessionExpired(path: string) {
+  if (sessionExpiredDispatched || !path.startsWith('/api/me')) return;
+  sessionExpiredDispatched = true;
+  if (typeof window !== 'undefined') window.dispatchEvent(new CustomEvent('moyin:session-expired'));
+}
 
 function combineSignals(primary: AbortSignal | null | undefined, timeout: AbortSignal): AbortSignal {
   if (!primary) return timeout;
@@ -411,6 +426,7 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   if (!response.ok) {
     const detail = data.detail || data.message || `HTTP ${response.status}`;
     const code = typeof data.code === 'string' ? data.code : undefined;
+    if (response.status === 401) notifySessionExpired(path);
     throw new ApiError(translateError(detail, response.status), { status: response.status, code });
   }
   return data as T;
@@ -418,7 +434,7 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
 
 export const api = {
   config: () => request<PublicSettings>('/api/public/config'),
-  sessionStatus: () => request<{ authenticated: boolean; admin: boolean; status?: string; role?: string }>('/api/public/session-status'),
+  sessionStatus: () => request<{ authenticated: boolean; admin: boolean; accountStatus?: string; status?: string; role?: string }>('/api/public/session-status'),
   validatePasswordReset: (token: string) =>
     request<{ valid: boolean; username: string; expiresAt: string; passwordMinLength: number }>('/api/public/password-reset/validate', {
       method: 'POST', body: JSON.stringify({ token }),
@@ -436,17 +452,20 @@ export const api = {
     request<{ user: PortalUser }>('/api/auth/login', {
       method: 'POST', body: JSON.stringify({ username, password }),
     }),
-  me: () => request<{ user: PortalUser; capabilities: UserCapabilities }>('/api/me'),
+  me: () => request<{ user: PortalUser; capabilities: UserCapabilities; community?: { membership: string; graceDeadline: string | null; policyScope: string; recoveryAction: string | null }; upstream?: { state: string; lastSuccessfulSyncAt: string | null } }>('/api/me'),
   exportMyData: () => request<Record<string, unknown>>('/api/me/export'),
   librarySummary: () => request<LibrarySummary>('/api/library/summary'),
   redeem: (code: string) => request<{ user: PortalUser; redeemedCode: string; upstreamReactivated?: boolean; message?: string }>('/api/me/redeem', {
     method: 'POST', body: JSON.stringify({ code }),
   }),
+  renewalPreview: (code: string) => request<{ durationDays: number; currentExpiresAt: string | null; nextExpiresAt: string | null; previewToken: string; operationId: string; previewExpiresAt: string }>('/api/me/renewal-preview', { method: 'POST', body: JSON.stringify({ code }) }),
+  renewalConfirm: (previewToken: string, operationId: string) => request<{ user: PortalUser; redeemedCode: string; upstreamReactivated?: boolean; message?: string }>('/api/me/renewal-confirm', { method: 'POST', body: JSON.stringify({ previewToken, operationId }) }),
   changePassword: (currentPassword: string, newPassword: string) =>
     request<{ user: PortalUser }>('/api/me/password', {
       method: 'POST', body: JSON.stringify({ currentPassword, newPassword }),
     }),
   generateTelegramBindToken: () => request<TelegramBindTokenResponse>('/api/me/telegram/bind-token', { method: 'POST' }),
+  telegramBindingStatus: () => request<{ bound: boolean; phase: string; expiresAt?: string; attemptsRemaining?: number; user?: PortalUser; operation?: { completed: boolean; retryRequired: boolean; errorCategory?: string | null } | null }>('/api/me/telegram/binding-status'),
   unbindTelegram: () => request<{ ok: boolean; user: PortalUser }>('/api/me/telegram/binding', { method: 'DELETE' }),
   rewards: () => request<RewardSummary>('/api/me/rewards'),
   checkin: () => request<{ alreadyCheckedIn: boolean; date: string; streak: number; pointsAwarded: number; balance: number }>('/api/me/checkin', { method: 'POST' }),
@@ -456,10 +475,10 @@ export const api = {
   referrals: () => request<{ items: ReferralRecord[] }>('/api/me/referrals'),
   createReferral: () => request<{ code: string; expiresAt: string; accountDays: number; rewardPoints: number; existing: boolean }>('/api/me/referrals', { method: 'POST' }),
   mediaRequests: () => request<{ items: MediaRequestRecord[] }>('/api/me/requests'),
-  createMediaRequest: (payload: { title: string; details?: string }) => request<{ item: MediaRequestRecord }>('/api/me/requests', { method: 'POST', body: JSON.stringify(payload) }),
+  createMediaRequest: (payload: { title: string; details?: string; confirmDifferentVersion?: boolean }) => request<{ item: MediaRequestRecord }>('/api/me/requests', { method: 'POST', body: JSON.stringify(payload) }),
   cancelMediaRequest: (requestId: string) => request<{ item: MediaRequestRecord }>(`/api/me/requests/${requestId}/cancel`, { method: 'POST' }),
   deleteMediaRequest: (requestId: string) => request<{ ok: boolean; id: string }>(`/api/me/requests/${requestId}`, { method: 'DELETE' }),
-  createCodes: (payload: { type: string; durationDays: number; count: number; maxUses: number; note?: string }) =>
+  createCodes: (payload: { type: string; durationDays: number; count: number; maxUses: number; perUserMaxUses: number; expiresAt?: string; designatedUsername?: string; note?: string }) =>
     request<{ codes: CodeRecord[] }>('/api/admin/codes', { method: 'POST', body: JSON.stringify(payload) }),
   listCodes: () => request<{ codes: CodeRecord[] }>('/api/admin/codes'),
   updateCodeStatus: (codeId: string, status: 'active' | 'disabled') =>
@@ -483,8 +502,8 @@ export const api = {
   adminSetUserExpiry: (userId: string, payload: { expiresAt?: string; extendDays?: number; clear?: boolean }) =>
     request<{ user: AdminUser }>(`/api/admin/users/${userId}/expiry`, { method: 'POST', body: JSON.stringify(payload) }),
   adminBulkExtendUserExpiryPreview: (payload: { extendDays: number }) =>
-    request<{ summary: { matched: number; affected: number; active: number; expired: number; disabled: number; permanent: number; reactivatable: number; skippedAdmins: number } }>('/api/admin/users/bulk/expiry/preview', { method: 'POST', body: JSON.stringify(payload) }),
-  adminBulkExtendUserExpiry: (payload: { extendDays: number; reason?: string }) =>
+    request<{ summary: { matched: number; affected: number; active: number; expired: number; disabled: number; permanent: number; reactivatable: number; skippedAdmins: number }; previewToken: string; operationId: string; expiresAt: string }>('/api/admin/users/bulk/expiry/preview', { method: 'POST', body: JSON.stringify(payload) }),
+  adminBulkExtendUserExpiry: (payload: { extendDays: number; reason?: string; previewToken: string; operationId: string }) =>
     request<{ summary: { matched: number; updated: number; reactivated: number; skippedPermanent: number; skippedAdmins: number }; users: AdminUser[] }>('/api/admin/users/bulk/expiry', { method: 'POST', body: JSON.stringify(payload) }),
   adminDeleteUser: (userId: string) =>
     request<{ ok: boolean; id: string }>(`/api/admin/users/${userId}`, { method: 'DELETE' }),
@@ -492,7 +511,7 @@ export const api = {
   adminRequests: (status?: string) => request<{ items: MediaRequestRecord[] }>(`/api/admin/operations/requests${status ? `?status=${encodeURIComponent(status)}` : ''}`),
   adminUpdateRequest: (requestId: string, status: 'accepted' | 'available' | 'rejected', note?: string) => request<{ item: MediaRequestRecord }>(`/api/admin/operations/requests/${requestId}`, { method: 'POST', body: JSON.stringify({ status, note }) }),
   adminNotifications: (status?: string) => request<{ items: AdminNotification[] }>(`/api/admin/operations/notifications${status ? `?status=${encodeURIComponent(status)}` : ''}`),
-  adminRetryNotification: (notificationId: string) => request<{ ok: boolean; status: string }>(`/api/admin/operations/notifications/${notificationId}/retry`, { method: 'POST' }),
+  adminRetryNotification: (notificationId: string, expectedVersion: number) => request<{ ok: boolean; status: string; version: number }>(`/api/admin/operations/notifications/${notificationId}/retry`, { method: 'POST', body: JSON.stringify({ expectedVersion }) }),
   adminPreviewBroadcast: (audience: BroadcastAudience) => request<BroadcastPreview>(`/api/admin/operations/broadcast/preview?audience=${encodeURIComponent(audience)}`),
   adminCreateBroadcast: (payload: { audience: BroadcastAudience; message: string; confirmCount: number; idempotencyKey: string }) => request<{ ok: boolean; batchId: string; queued: number; idempotentReplay: boolean }>('/api/admin/operations/broadcast', { method: 'POST', body: JSON.stringify(payload) }),
   adminMemberships: (status?: string) => request<{ items: AdminMembership[] }>(`/api/admin/operations/memberships${status ? `?status=${encodeURIComponent(status)}` : ''}`),

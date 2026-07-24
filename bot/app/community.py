@@ -2,6 +2,7 @@ import time
 from collections.abc import Awaitable, Callable
 
 import httpx
+from telegram.error import TimedOut
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ChatMemberStatus
 from telegram.error import TelegramError
@@ -11,7 +12,7 @@ from app.config import BotSettings
 from app.internal_api import InternalApi
 
 BotHandler = Callable[[Update, ContextTypes.DEFAULT_TYPE], Awaitable[None]]
-_config_cache: tuple[float, dict] | None = None
+_config_cache: tuple[InternalApi, float, dict] | None = None
 _membership_cache: dict[tuple[str, int], tuple[float, bool]] = {}
 _MEMBERSHIP_CACHE_SECONDS = 60
 
@@ -27,10 +28,10 @@ def _admin_ids() -> set[str]:
 async def _config(api: InternalApi) -> dict:
     global _config_cache
     now = time.monotonic()
-    if _config_cache and now - _config_cache[0] < 60:
-        return _config_cache[1]
+    if _config_cache and _config_cache[0] is api and now - _config_cache[1] < 60:
+        return _config_cache[2]
     value = await api.community_config()
-    _config_cache = (now, value)
+    _config_cache = (api, now, value)
     return value
 
 
@@ -64,6 +65,15 @@ def required_group_handler(handler: BotHandler, api: InternalApi) -> BotHandler:
         if not config.get("enabled") or not group_id:
             await handler(update, context)
             return
+        if config.get("scope") == "new_users_only":
+            try:
+                eligibility = await api.community_eligibility(user.id)
+            except httpx.HTTPError:
+                await update.effective_message.reply_text("群组资格范围暂时无法确认，请稍后重试。")
+                return
+            if not eligibility.get("applicable"):
+                await handler(update, context)
+                return
         try:
             cache_key = (group_id, user.id)
             cached = _membership_cache.get(cache_key)
@@ -76,7 +86,7 @@ def required_group_handler(handler: BotHandler, api: InternalApi) -> BotHandler:
         except TelegramError:
             await update.effective_message.reply_text("群组资格暂时无法验证，请联系管理员检查 Bot 权限。")
             return
-        await api.report_membership(user.id, group_id=group_id, is_member=is_member)
+        membership = await api.report_membership(user.id, group_id=group_id, is_member=is_member)
         if is_member:
             await handler(update, context)
             return
@@ -86,8 +96,22 @@ def required_group_handler(handler: BotHandler, api: InternalApi) -> BotHandler:
             if invite_url
             else None
         )
+        query = update.callback_query
+        if query is not None:
+            try:
+                await query.answer()
+            except TimedOut:
+                pass
+        grace_deadline = str(membership.get("graceExpiresAt") or "").strip()
+        if membership.get("status") == "grace" and grace_deadline:
+            text = (
+                "你当前不在必需群组，因此 Bot 功能已暂停。"
+                f"媒体账号宽限期至 {grace_deadline}；加入群组后请重新发送命令。"
+            )
+        else:
+            text = "使用 Bot 前需要先加入指定群组。加入后请重新发送命令。"
         await update.effective_message.reply_text(
-            "使用 Bot 前需要先加入指定群组。加入后请重新发送命令。",
+            text,
             reply_markup=markup,
         )
 

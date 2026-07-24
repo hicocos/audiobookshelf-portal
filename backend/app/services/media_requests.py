@@ -1,3 +1,5 @@
+import unicodedata
+
 from sqlalchemy import update
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select
@@ -9,13 +11,41 @@ class MediaRequestLimitError(ValueError):
     pass
 
 
+class MediaRequestDuplicateError(ValueError):
+    def __init__(self, existing: MediaRequest):
+        super().__init__("同一账号已提交过同标题工单，请确认是否为不同版本。")
+        self.existing = existing
+
+
+REQUEST_STATUS_LABELS = {
+    "pending": "待处理", "accepted": "已受理", "available": "已上架",
+    "rejected": "未采纳", "cancelled": "已撤销",
+}
+
+
+def media_request_status_label(status: str) -> str:
+    return REQUEST_STATUS_LABELS.get(status, status)
+
+
+def normalize_media_title(value: str) -> str:
+    normalized = unicodedata.normalize("NFKC", value).casefold()
+    return "".join(char for char in normalized if char.isalnum())
+
+
 def create_open_media_request(
     session: Session,
     *,
     portal_user_id: str,
     title: str,
     details: str | None,
+    confirm_different_version: bool = False,
 ) -> MediaRequest:
+    normalized_title = normalize_media_title(title)
+    existing = next((item for item in session.exec(
+        select(MediaRequest).where(MediaRequest.portal_user_id == portal_user_id)
+    ).all() if normalize_media_title(item.title) == normalized_title), None)
+    if existing is not None and not confirm_different_version:
+        raise MediaRequestDuplicateError(existing)
     used_slots = set(
         session.exec(
             select(MediaRequest.open_slot).where(

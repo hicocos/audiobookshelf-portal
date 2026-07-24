@@ -1,4 +1,6 @@
 import json
+import hashlib
+import base64
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -10,12 +12,14 @@ from sqlmodel import Session, select
 
 from app.models import (
     AuditLog,
+    AccountOperation,
     DailyCheckin,
     PointAccount,
     PointLedgerEntry,
     PortalUser,
     utcnow,
 )
+from app.services.account_state import sync_expiry_hold
 from app.services.reconciliation import enqueue_reconciliation_job
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
@@ -231,6 +235,43 @@ async def redeem_points_for_days(
         raise RewardError("invalid idempotency key")
     cost = days * points_per_day
     redemption_id = f"points-redeem:{user.id}:{normalized_key}"
+    request_hash = hashlib.sha256(
+        json.dumps(
+            {"days": days, "pointsPerDay": points_per_day},
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    operation = session.exec(
+        select(AccountOperation).where(
+            AccountOperation.idempotency_key == redemption_id
+        )
+    ).first()
+    if operation is not None:
+        if operation.request_hash != request_hash:
+            raise RewardError("idempotency key was already used with different parameters")
+        if operation.result_json:
+            try:
+                result = json.loads(operation.result_json)
+            except (json.JSONDecodeError, TypeError) as exc:
+                raise RewardError("stored redemption result is invalid") from exc
+            return {**result, "idempotentReplay": True}
+        existing_entry = session.exec(
+            select(PointLedgerEntry).where(PointLedgerEntry.reference == redemption_id)
+        ).first()
+        if existing_entry is not None:
+            job_id = operation.reconciliation_job_id
+            return {
+                "operationId": operation.id,
+                "phase": operation.phase,
+                "days": days,
+                "cost": abs(existing_entry.amount),
+                "balance": existing_entry.balance_after,
+                "expiresAt": _aware(user.expires_at).isoformat(),
+                "upstreamReactivated": False,
+                "reconciliationJobId": job_id,
+                "idempotentReplay": True,
+            }
     existing = session.exec(
         select(PointLedgerEntry).where(PointLedgerEntry.reference == redemption_id)
     ).first()
@@ -247,9 +288,18 @@ async def redeem_points_for_days(
             "cost": abs(existing.amount),
             "balance": existing.balance_after,
             "expiresAt": _aware(user.expires_at).isoformat(),
-            "upstreamReactivated": True,
+            "upstreamReactivated": False,
+            "reconciliationJobId": None,
             "idempotentReplay": True,
         }
+    operation = AccountOperation(
+        kind="points_redemption",
+        portal_user_id=user.id,
+        idempotency_key=redemption_id,
+        phase="applying_local",
+        request_hash=request_hash,
+    )
+    session.add(operation)
     debit_points(
         session,
         user,
@@ -263,8 +313,13 @@ async def redeem_points_for_days(
     base = current if current and current > now else now
     user.expires_at = base + timedelta(days=days)
     was_expired = user.status == "expired" or bool(current and current <= now)
-    if user.status == "expired":
-        user.status = "active"
+    sync_expiry_hold(
+        session,
+        user,
+        actor=user.username,
+        source="points_redemption",
+        now=now,
+    )
     user.updated_at = now
     session.add(user)
     session.add(
@@ -277,6 +332,22 @@ async def redeem_points_for_days(
             detail_json=json.dumps({"days": days, "cost": cost}),
         )
     )
+    job = None
+    if was_expired and user.status == "active" and user.abs_user_id:
+        job = enqueue_reconciliation_job(
+            session,
+            idempotency_key=redemption_id,
+            operation="set_active",
+            target_type="portal_user",
+            target_id=user.id,
+            abs_user_id=user.abs_user_id,
+            payload={"isActive": True, "source": "points_redemption"},
+        )
+        session.flush()
+        operation.reconciliation_job_id = job.id
+    operation.phase = "local_committed"
+    operation.updated_at = now
+    session.add(operation)
     try:
         session.commit()
     except IntegrityError:
@@ -294,54 +365,106 @@ async def redeem_points_for_days(
             raise RewardError("idempotency key was already used with different parameters")
         current_user = session.get(PortalUser, user.id)
         return {
+            "operationId": operation.id,
+            "phase": "completed",
             "days": int(original_detail["days"]),
             "cost": abs(existing.amount),
             "balance": existing.balance_after,
             "expiresAt": _aware(current_user.expires_at).isoformat(),
-            "upstreamReactivated": True,
+            "upstreamReactivated": False,
+            "reconciliationJobId": None,
             "idempotentReplay": True,
         }
     upstream_reactivated = True
-    if was_expired and user.abs_user_id:
+    if job is not None:
         try:
             async with abs_factory() as abs_client:
                 await abs_client.update_user(user.abs_user_id, {"isActive": True})
         except (httpx.HTTPError, TypeError, RuntimeError):
             upstream_reactivated = False
-            enqueue_reconciliation_job(
-                session,
-                idempotency_key=redemption_id,
-                operation="set_active",
-                target_type="portal_user",
-                target_id=user.id,
-                abs_user_id=user.abs_user_id,
-                payload={"isActive": True, "source": "points_redemption"},
-            )
-            session.commit()
+        else:
+            completed_at = utcnow()
+            job.status = "succeeded"
+            job.attempts = int(job.attempts or 0) + 1
+            job.last_error = None
+            job.succeeded_at = completed_at
+            job.updated_at = completed_at
+            session.add(job)
     account = session.get(PointAccount, user.id)
-    return {
+    result = {
+        "operationId": operation.id,
+        "phase": "completed" if upstream_reactivated else "reconciliation_pending",
         "days": days,
         "cost": cost,
         "balance": account.balance,
         "expiresAt": user.expires_at.isoformat(),
         "upstreamReactivated": upstream_reactivated,
+        "reconciliationJobId": job.id if job and not upstream_reactivated else None,
         "idempotentReplay": False,
     }
+    operation.phase = result["phase"]
+    operation.status = "completed"
+    operation.result_json = json.dumps(result, ensure_ascii=False, separators=(",", ":"))
+    operation.completed_at = utcnow()
+    operation.updated_at = operation.completed_at
+    session.add(operation)
+    session.commit()
+    return result
 
 
-def points_summary(session: Session, user: PortalUser) -> dict[str, Any]:
+POINT_REASON_LABELS = {
+    "daily_checkin": "每日签到",
+    "referral_reward": "邀请奖励",
+    "redeem_expiry_days": "兑换有效期",
+    "admin_adjustment": "管理员调整",
+    "test_grant": "积分发放",
+}
+
+
+def _ledger_cursor(entry: PointLedgerEntry) -> str:
+    raw = json.dumps(
+        {"createdAt": _aware(entry.created_at).isoformat(), "id": entry.id},
+        separators=(",", ":"),
+    ).encode()
+    return base64.urlsafe_b64encode(raw).decode().rstrip("=")
+
+
+def _decode_ledger_cursor(cursor: str) -> tuple[datetime, str]:
+    try:
+        padded = cursor + "=" * (-len(cursor) % 4)
+        value = json.loads(base64.urlsafe_b64decode(padded).decode())
+        return datetime.fromisoformat(value["createdAt"]), str(value["id"])
+    except (ValueError, KeyError, TypeError, json.JSONDecodeError) as exc:
+        raise RewardError("invalid ledger cursor") from exc
+
+
+def points_summary(
+    session: Session,
+    user: PortalUser,
+    *,
+    limit: int = 10,
+    cursor: str | None = None,
+) -> dict[str, Any]:
     account = get_point_account(session, user)
     latest = session.exec(
         select(DailyCheckin)
         .where(DailyCheckin.portal_user_id == user.id)
         .order_by(DailyCheckin.local_date.desc())
     ).first()
+    page_size = max(1, min(limit, 50))
+    history_query = select(PointLedgerEntry).where(PointLedgerEntry.portal_user_id == user.id)
+    if cursor:
+        created_at, entry_id = _decode_ledger_cursor(cursor)
+        history_query = history_query.where(
+            (PointLedgerEntry.created_at < created_at)
+            | ((PointLedgerEntry.created_at == created_at) & (PointLedgerEntry.id < entry_id))
+        )
     history = session.exec(
-        select(PointLedgerEntry)
-        .where(PointLedgerEntry.portal_user_id == user.id)
-        .order_by(PointLedgerEntry.created_at.desc())
-        .limit(10)
+        history_query.order_by(PointLedgerEntry.created_at.desc(), PointLedgerEntry.id.desc())
+        .limit(page_size + 1)
     ).all()
+    has_more = len(history) > page_size
+    history = history[:page_size]
     return {
         "balance": account.balance,
         "lifetimeEarned": account.lifetime_earned,
@@ -353,10 +476,12 @@ def points_summary(session: Session, user: PortalUser) -> dict[str, Any]:
                 "amount": item.amount,
                 "balanceAfter": item.balance_after,
                 "kind": item.kind,
+                "reasonLabel": POINT_REASON_LABELS.get(item.kind, "积分变动"),
                 "createdAt": item.created_at.isoformat(),
             }
             for item in history
         ],
+        "nextCursor": _ledger_cursor(history[-1]) if has_more and history else None,
     }
 
 

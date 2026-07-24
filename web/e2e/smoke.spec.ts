@@ -58,6 +58,27 @@ test('首页可以访问', async ({ page }) => {
   await expect(page.getByRole('link', { name: '申请访问' })).toBeVisible();
 });
 
+test('首页对待启用会话显示继续绑定而不是重复注册', async ({ page }) => {
+  await page.unroute('**/api/public/session-status');
+  await page.route('**/api/public/session-status', fulfillApi({ authenticated: true, admin: false, accountStatus: 'pending' }));
+  await page.goto('/');
+  await expect(page.getByRole('link', { name: '继续绑定 Telegram' })).toHaveAttribute('href', '/dashboard');
+  await expect(page.getByRole('link', { name: '申请访问' })).toHaveCount(0);
+});
+
+test('390 宽首屏直接呈现待启用账号的关键状态与操作', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.unroute('**/api/public/session-status');
+  await page.route('**/api/public/session-status', fulfillApi({ authenticated: true, admin: false, accountStatus: 'pending' }));
+  await page.goto('/');
+  const continueBinding = page.getByRole('link', { name: '继续绑定 Telegram' });
+  await expect(continueBinding).toBeVisible();
+  await expect(page.getByText('账号待启用，请完成 Telegram 绑定。')).toBeVisible();
+  const box = await continueBinding.boundingBox();
+  expect(box).not.toBeNull();
+  expect(box!.y + box!.height).toBeLessThanOrEqual(844);
+});
+
 test('登录页可以访问', async ({ page }) => {
   await page.goto('/login');
   await expect(page.getByRole('heading', { name: /登录 MoYin\.CC/ })).toBeVisible();
@@ -75,6 +96,46 @@ test('注册页可以访问', async ({ page }) => {
 test('登录页提供清晰的密码恢复入口', async ({ page }) => {
   await page.goto('/login');
   await expect(page.getByRole('link', { name: '忘记密码' })).toBeVisible();
+});
+
+test('密码重置 deep link 从 fragment 读取令牌并立即清除地址栏敏感信息', async ({ page }) => {
+  let validatedToken = '';
+  await page.route('**/api/public/password-reset/validate', async (route) => {
+    validatedToken = JSON.parse(route.request().postData() || '{}').token || '';
+    await fulfillApi({ valid: true, username: 'alice', expiresAt: '2026-07-23T12:00:00Z', passwordMinLength: 8 })(route);
+  });
+  await page.goto('/reset-password#token=deep-link-secret');
+  await expect(page.getByText('正在为账号 alice 重置密码。')).toBeVisible();
+  expect(validatedToken).toBe('deep-link-secret');
+  await expect.poll(() => page.url()).toBe(`${new URL(page.url()).origin}/reset-password`);
+});
+
+test('抽屉在 768、1023 使用键盘模态交互，在 1024 恢复桌面导航', async ({ context, page }, testInfo) => {
+  test.skip(testInfo.project.name.startsWith('mobile-'), '精确 viewport 仅需在 Chromium 桌面上下文执行');
+  await context.addCookies([{ name: 'moyin_session', value: 'e2e-session', domain: '127.0.0.1', path: '/' }]);
+  const capabilities = { canListen: false, canRenew: false, canChangePassword: true, canCheckin: false, canRedeemPoints: false, canRefer: false, canRequest: false, canViewLeaderboard: false, canAdmin: false, unavailableReasons: {} };
+  await page.route(meEndpoint, fulfillApi({ user: { id: 'u1', username: 'alice', role: 'user', status: 'active', expiresAt: '2027-01-01T00:00:00Z' }, capabilities }));
+
+  for (const width of [768, 1023]) {
+    await page.setViewportSize({ width, height: 800 });
+    await page.goto('/dashboard');
+    const trigger = page.getByRole('button', { name: '打开导航菜单' });
+    await expect(trigger).toBeVisible();
+    await trigger.focus();
+    await page.keyboard.press('Enter');
+    const drawer = page.getByRole('dialog', { name: '栏目导航' });
+    await expect(drawer).toBeVisible();
+    await expect(drawer).toBeFocused();
+    await page.keyboard.press('Shift+Tab');
+    await expect(page.getByRole('button', { name: '关闭导航菜单' })).toBeFocused();
+    await page.keyboard.press('Escape');
+    await expect(trigger).toBeFocused();
+  }
+
+  await page.setViewportSize({ width: 1024, height: 800 });
+  await page.goto('/dashboard');
+  await expect(page.getByRole('button', { name: '打开导航菜单' })).toBeHidden();
+  await expect(page.getByRole('button', { name: '收缩导航栏' })).toBeVisible();
 });
 
 test('基础页面不会产生横向溢出', async ({ page }) => {
@@ -169,6 +230,41 @@ test('账号中心按能力隐藏入口并且不请求禁用功能', async ({ co
   expect(requested).not.toContain('/api/me/referrals');
   expect(requested).not.toContain('/api/me/requests');
   expect(requested).not.toContain('/api/me/leaderboard');
+});
+
+test('Dashboard 可对失败模块独立重试而不重新请求账号信息', async ({ context, page }) => {
+  await context.addCookies([{ name: 'moyin_session', value: 'e2e-session', domain: '127.0.0.1', path: '/' }]);
+  const capabilities = { canListen: false, canRenew: false, canChangePassword: true, canCheckin: true, canRedeemPoints: false, canRefer: false, canRequest: false, canViewLeaderboard: false, canAdmin: false, unavailableReasons: {} };
+  let meCalls = 0;
+  let rewardsCalls = 0;
+  let rewardsAvailable = false;
+  await page.route(meEndpoint, async (route) => { meCalls += 1; await fulfillApi({ user: { id: 'u1', username: 'alice', role: 'user', status: 'active', expiresAt: '2027-01-01T00:00:00Z' }, capabilities })(route); });
+  await page.route('**/api/me/rewards', async (route) => {
+    rewardsCalls += 1;
+    if (!rewardsAvailable) await route.fulfill({ status: 503, json: { detail: '暂时不可用' } });
+    else await fulfillApi({ balance: 42, lifetimeEarned: 42, leaderboardOptIn: false, streak: 2, lastCheckinDate: null, history: [] })(route);
+  });
+  await page.goto('/dashboard?tab=rewards');
+  await expect(page.getByText(/积分数据暂时无法加载/)).toBeVisible();
+  const initialRewardsCalls = rewardsCalls;
+  rewardsAvailable = true;
+  await page.getByRole('button', { name: '重试积分数据' }).click();
+  await expect(page.getByText('当前积分').locator('..')).toContainText('42');
+  expect(meCalls).toBe(1);
+  expect(rewardsCalls).toBe(initialRewardsCalls + 1);
+});
+
+test('Telegram 绑定码显示实时倒计时并轮询完成状态', async ({ context, page }) => {
+  await context.addCookies([{ name: 'moyin_session', value: 'e2e-session', domain: '127.0.0.1', path: '/' }]);
+  const user = { id: 'u1', username: 'alice', role: 'user', status: 'pending', expiresAt: null, telegramBindingRequired: true, telegramBound: false };
+  const capabilities = { canListen: false, canRenew: false, canChangePassword: true, canCheckin: false, canRedeemPoints: false, canRefer: false, canRequest: false, canViewLeaderboard: false, canAdmin: false, unavailableReasons: {} };
+  await page.route(meEndpoint, fulfillApi({ user, capabilities }));
+  await page.route('**/api/me/telegram/bind-token', fulfillApi({ code: 'ABC123', command: '/bind ABC123', botUsername: 'moyin_bot', expiresAt: new Date(Date.now() + 65_000).toISOString() }));
+  await page.route('**/api/me/telegram/binding-status', fulfillApi({ bound: true, phase: 'completed', user: { ...user, status: 'active', telegramBound: true, telegramUsername: 'alice_tg' } }));
+  await page.goto('/dashboard');
+  await page.getByRole('button', { name: '生成绑定码' }).click();
+  await expect(page.getByText(/剩余 0[01]:\d{2}/)).toBeVisible();
+  await expect(page.getByRole('dialog')).toContainText('Telegram 绑定完成');
 });
 
 test('签到成功使用弹窗提示', async ({ context, page }, testInfo) => {

@@ -6,7 +6,17 @@ from sqlmodel import Session, SQLModel, create_engine, select
 
 from app.db import get_session
 from app.main import app
-from app.models import AuditLog, Code, MediaRequest, PortalUser, TelegramNotification, utcnow
+from app.models import (
+    AccountOperation,
+    AuditLog,
+    Code,
+    MediaRequest,
+    PortalUser,
+    ReconciliationJob,
+    TelegramNotification,
+    TelegramFlowSession,
+    utcnow,
+)
 from app.routers.auth import get_abs_client_factory
 from app.security import hash_password, verify_password
 from app.services.telegram_binding import create_bind_token
@@ -15,6 +25,9 @@ from app.services.telegram_binding import create_bind_token
 class FakeAbsClient:
     def __init__(self):
         self.created = []
+        self.deleted = []
+        self.fail_update = False
+        self.fail_delete = False
         self.libraries = [{"id": "lib1", "name": "内测", "mediaType": "book"}]
         self.user = {
             "id": "abs-alice",
@@ -82,9 +95,17 @@ class FakeAbsClient:
         return {"id": "abs-created", "username": kwargs["username"]}
 
     async def update_user(self, user_id, payload):
+        if self.fail_update:
+            raise RuntimeError("upstream unavailable")
         self.user.update(payload)
         self.user["id"] = user_id
         return dict(self.user)
+
+    async def delete_user(self, user_id):
+        if self.fail_delete:
+            raise RuntimeError("upstream unavailable")
+        self.deleted.append(user_id)
+        return True
 
     async def get_library_item(self, item_id):
         return next(item for item in self.items if item["id"] == item_id)
@@ -298,6 +319,89 @@ def test_internal_register_rejects_when_telegram_already_bound(monkeypatch):
         teardown_client()
 
 
+def test_internal_register_reuses_soft_deleted_username_with_a_new_identity(monkeypatch):
+    client, engine, fake_abs, token = make_client(monkeypatch)
+    try:
+        with Session(engine) as session:
+            deleted = seed_user(
+                session,
+                username="Reserved_User",
+                status="deleted",
+                role="root",
+                telegram_id="legacy-telegram-id",
+            )
+            deleted_id = deleted.id
+            old_password_hash = deleted.password_hash
+            session.add(Code(code="INVITE-TG", type="register", duration_days=7))
+            session.commit()
+
+        response = client.post(
+            "/api/internal/tg/register",
+            headers=auth_headers(token),
+            json={
+                "telegramId": "new-telegram-id",
+                "telegramUsername": "new_tg",
+                "username": "reserved_user",
+                "inviteCode": "INVITE-TG",
+            },
+        )
+
+        assert response.status_code == 200, response.text
+        replacement = response.json()["user"]
+        assert replacement["id"] != deleted_id
+        assert replacement["username"] == "reserved_user"
+        assert fake_abs.created[-1]["username"] == "reserved_user"
+        with Session(engine) as session:
+            archived = session.get(PortalUser, deleted_id)
+            created = session.get(PortalUser, replacement["id"])
+            code = session.exec(select(Code).where(Code.code == "INVITE-TG")).one()
+            assert archived is not None
+            assert archived.username == f"__deleted__:{deleted_id}"
+            assert archived.status == "deleted"
+            assert archived.role == "root"
+            assert archived.telegram_id == "legacy-telegram-id"
+            assert archived.password_hash == old_password_hash
+            assert created is not None
+            assert created.role == "user"
+            assert created.telegram_id == "new-telegram-id"
+            assert code.used_count == 1
+    finally:
+        teardown_client()
+
+
+def test_registration_flow_allows_soft_deleted_username_at_username_check(monkeypatch):
+    client, engine, fake_abs, token = make_client(monkeypatch)
+    try:
+        with Session(engine) as session:
+            seed_user(session, username="reserved_user", status="deleted")
+            session.add(Code(code="FLOW-INVITE", type="register", duration_days=14))
+            session.commit()
+
+        invite = client.post(
+            "/api/internal/tg/register/invite/check",
+            headers=auth_headers(token),
+            json={"telegramId": "42", "inviteCode": "FLOW-INVITE"},
+        )
+        assert invite.status_code == 200, invite.text
+
+        username = client.post(
+            "/api/internal/tg/register/username/check",
+            headers=auth_headers(token),
+            json={"telegramId": "42", "username": "reserved_user"},
+        )
+
+        assert username.status_code == 200, username.text
+        assert username.json()["username"] == "reserved_user"
+        assert fake_abs.created == []
+        flow = client.get("/api/internal/tg/flow/42", headers=auth_headers(token)).json()
+        assert flow["step"] == "register_confirm"
+        with Session(engine) as session:
+            code = session.exec(select(Code).where(Code.code == "FLOW-INVITE")).one()
+            assert code.used_count == 0
+    finally:
+        teardown_client()
+
+
 def test_binding_activates_web_registered_pending_account(monkeypatch):
     client, engine, fake_abs, token = make_client(monkeypatch)
     try:
@@ -326,6 +430,112 @@ def test_binding_activates_web_registered_pending_account(monkeypatch):
             assert saved.telegram_id == "987654321"
             assert saved.expires_at > old_expiry + timedelta(days=1)
         assert fake_abs.user["isActive"] is True
+    finally:
+        teardown_client()
+
+
+def test_a07_binding_route_returns_retryable_phase_and_me_completes_same_operation(
+    monkeypatch,
+):
+    client, engine, fake_abs, token = make_client(monkeypatch)
+    try:
+        with Session(engine) as session:
+            user = seed_user(session, status="pending", abs_user_id="abs-alice")
+            user.telegram_binding_required = True
+            session.add(user)
+            session.commit()
+            code, _ = create_bind_token(session, user)
+            user_id = user.id
+
+        fake_abs.fail_update = True
+        pending = client.post(
+            "/api/internal/tg/bind",
+            headers=auth_headers(token),
+            json={
+                "code": code,
+                "telegramId": "7007",
+                "telegramUsername": "listener_a07",
+                "operationId": "binding-route-a07",
+            },
+        )
+
+        assert pending.status_code == 200, pending.text
+        assert pending.json()["user"]["status"] == "pending"
+        assert pending.json()["bindingOperation"] == {
+            "operationId": "binding-route-a07",
+            "phase": "activation_pending",
+            "completed": False,
+            "retryRequired": True,
+            "errorCategory": "RuntimeError",
+        }
+        with Session(engine) as session:
+            operation = session.exec(
+                select(AccountOperation).where(
+                    AccountOperation.portal_user_id == user_id,
+                    AccountOperation.kind == "telegram_binding_activation",
+                )
+            ).one()
+            assert operation.phase == "activation_pending"
+
+        fake_abs.fail_update = False
+        completed = client.get(
+            "/api/internal/tg/me/7007",
+            headers=auth_headers(token),
+        )
+
+        assert completed.status_code == 200, completed.text
+        assert completed.json()["user"]["status"] == "active"
+        assert completed.json()["bindingOperation"]["operationId"] == "binding-route-a07"
+        assert completed.json()["bindingOperation"]["phase"] == "completed"
+        assert completed.json()["bindingOperation"]["retryRequired"] is False
+        with Session(engine) as session:
+            operations = session.exec(
+                select(AccountOperation).where(
+                    AccountOperation.portal_user_id == user_id,
+                    AccountOperation.kind == "telegram_binding_activation",
+                )
+            ).all()
+            assert len(operations) == 1
+    finally:
+        teardown_client()
+
+
+def test_a08_bot_registration_commit_failure_uses_durable_orphan_compensation(
+    monkeypatch,
+):
+    client, engine, fake_abs, token = make_client(monkeypatch)
+    try:
+        fake_abs.fail_delete = True
+        with Session(engine) as session:
+            seed_user(
+                session,
+                username="existing_abs_owner",
+                abs_user_id="abs-created",
+            )
+            session.add(Code(code="A08-BOT-INVITE", type="register", duration_days=7))
+            session.commit()
+
+        response = client.post(
+            "/api/internal/tg/register",
+            headers=auth_headers(token),
+            json={
+                "telegramId": "8008",
+                "telegramUsername": "a08_bot",
+                "username": "new_a08_bot_user",
+                "inviteCode": "A08-BOT-INVITE",
+            },
+        )
+
+        assert response.status_code == 409, response.text
+        with Session(engine) as session:
+            job = session.exec(
+                select(ReconciliationJob).where(
+                    ReconciliationJob.target_type == "provisioning_orphan",
+                    ReconciliationJob.abs_user_id == "abs-created",
+                )
+            ).one()
+            assert job.status == "pending"
+            assert job.idempotency_key == "provision-cleanup:abs-created"
     finally:
         teardown_client()
 
@@ -361,7 +571,8 @@ def test_persistent_registration_flow_survives_across_requests(monkeypatch):
         assert confirmed.json()["user"]["username"] == "flow_user"
         assert fake_abs.created[-1]["username"] == "flow_user"
         assert client.get("/api/internal/tg/flow/42", headers=auth_headers(token)).json() == {
-            "active": False
+            "active": False,
+            "phase": "completed",
         }
     finally:
         teardown_client()
@@ -384,6 +595,31 @@ def test_input_flow_can_persist_audiobook_request_step(monkeypatch):
         assert flow.status_code == 200
         assert flow.json()["kind"] == "input"
         assert flow.json()["step"] == "request_audiobook"
+    finally:
+        teardown_client()
+
+
+def test_flow_endpoint_distinguishes_missing_expired_and_completed(monkeypatch):
+    client, engine, _fake_abs, token = make_client(monkeypatch)
+    try:
+        missing = client.get("/api/internal/tg/flow/missing", headers=auth_headers(token))
+        assert missing.json() == {"active": False, "phase": "missing"}
+
+        with Session(engine) as session:
+            session.add(TelegramFlowSession(
+                telegram_id="expired", kind="input", step="library_search",
+                expires_at=utcnow() - timedelta(seconds=1),
+            ))
+            session.add(TelegramFlowSession(
+                telegram_id="completed", kind="input", step="completed",
+                expires_at=utcnow() + timedelta(minutes=5),
+            ))
+            session.commit()
+
+        expired = client.get("/api/internal/tg/flow/expired", headers=auth_headers(token))
+        completed = client.get("/api/internal/tg/flow/completed", headers=auth_headers(token))
+        assert expired.json() == {"active": False, "phase": "expired"}
+        assert completed.json() == {"active": False, "phase": "completed"}
     finally:
         teardown_client()
 
@@ -706,7 +942,9 @@ def test_media_request_lifecycle_notifies_admin_and_requester(monkeypatch):
                 notice for notice in notices if notice.kind == "media_request_status"
             )
             assert status_notice.message == (
-                "您的工单已经处理。详细信息请到 Web 端查看。"
+                "你的有声书工单《测试有声书》状态已更新：已上架。\n"
+                "管理员备注：已入库\n"
+                "下一步：内容已上架，请打开 Web 工单详情或媒体客户端查看。"
             )
             reply = next(
                 notice for notice in notices if notice.kind == "media_request_reply"

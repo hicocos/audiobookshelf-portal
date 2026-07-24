@@ -19,9 +19,10 @@ from app.rate_limit import login_ip_limiter, login_limiter
 from app.security import create_access_token, hash_password, verify_password
 from app.session_cookie import clear_session_cookie, set_session_cookie
 from app.services.codes import CodeValidationError, redeem_code
+from app.services.provisioning import compensate_orphan_abs_user
 from app.services.settings import get_public_settings
 from app.services.referrals import settle_referral_reward
-from app.services.reconciliation import enqueue_reconciliation_job
+from app.services.usernames import archive_deleted_username, find_username_owner
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 logger = logging.getLogger(__name__)
@@ -153,10 +154,8 @@ async def register(
     # Match usernames case-insensitively so "MoYking" and "moyking" are the same
     # account, mirroring Audiobookshelf's case-insensitive usernames and preventing
     # near-duplicate registrations that differ only by letter case.
-    existing = session.exec(
-        select(PortalUser).where(func.lower(PortalUser.username) == payload.username.lower())
-    ).first()
-    if existing:
+    existing = find_username_owner(session, payload.username)
+    if existing is not None and existing.status != "deleted":
         raise HTTPException(status_code=409, detail="Username already exists")
 
     settings = Settings()
@@ -191,45 +190,30 @@ async def register(
         ) from exc
 
     expires_at = None if code.duration_days == 0 else utcnow() + timedelta(days=code.duration_days)
-    user = PortalUser(
-        username=payload.username,
-        password_hash=hash_password(payload.password),
-        email=payload.email,
-        abs_user_id=abs_user["id"],
-        abs_username=abs_user.get("username", payload.username),
-        expires_at=expires_at,
-        status="pending",
-        telegram_binding_required=True,
-    )
-    session.add(user)
     try:
+        if existing is not None:
+            archive_deleted_username(session, existing)
+        user = PortalUser(
+            username=payload.username,
+            password_hash=hash_password(payload.password),
+            email=payload.email,
+            abs_user_id=abs_user["id"],
+            abs_username=abs_user.get("username", payload.username),
+            expires_at=expires_at,
+            status="pending",
+            telegram_binding_required=True,
+        )
+        session.add(user)
         session.commit()
     except SQLAlchemyError as exc:
         session.rollback()
-        compensated = False
-        try:
-            async with abs_factory() as abs_client:
-                await abs_client.delete_user(str(abs_user["id"]))
-            compensated = True
-        except (httpx.HTTPError, TypeError, RuntimeError, KeyError):
-            logger.exception("Failed to compensate orphan ABS user after registration")
-        if not compensated:
-            # Persist a durable cleanup if the database itself is available
-            # after rollback. If it is not, the original exception still
-            # surfaces and the incident is visible in logs.
-            try:
-                enqueue_reconciliation_job(
-                    session,
-                    idempotency_key=f"register-cleanup:{abs_user['id']}",
-                    operation="delete_user",
-                    target_type="registration_orphan",
-                    target_id=payload.username,
-                    abs_user_id=str(abs_user["id"]),
-                    payload={"source": "web_registration_commit_failure"},
-                )
-                session.commit()
-            except SQLAlchemyError:
-                session.rollback()
+        await compensate_orphan_abs_user(
+            session,
+            abs_factory=abs_factory,
+            abs_user_id=str(abs_user["id"]),
+            username=payload.username,
+            source="web_registration_commit_failure",
+        )
         raise HTTPException(
             status_code=503,
             detail="Registration could not be completed; no invite was consumed. Please retry.",

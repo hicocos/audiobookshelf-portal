@@ -1,4 +1,4 @@
-from typing import Annotated
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_validator
 
@@ -96,6 +96,7 @@ class TelegramPatch(StrictPatchModel):
     lifecycleNotificationsEnabled: bool | None = None
     adminEnabled: bool | None = None
     groupMembershipEnabled: bool | None = None
+    groupPolicyScope: Literal["new_users_only"] | None = None
     requiredGroupId: Annotated[str, StringConstraints(max_length=128)] | None = None
     requiredGroupInviteUrl: str | None = None
     groupGraceHours: int | None = Field(default=None, ge=1, le=720)

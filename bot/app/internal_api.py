@@ -29,7 +29,12 @@ class InternalApi:
             self._client = None
 
     async def _request(self, method: str, path: str, **kwargs: Any) -> dict[str, Any]:
-        response = await self._get_client().request(method, path, **kwargs)
+        try:
+            response = await self._get_client().request(method, path, **kwargs)
+        except (httpx.TimeoutException, httpx.NetworkError):
+            if method.upper() not in {"GET", "HEAD", "OPTIONS"}:
+                raise
+            response = await self._get_client().request(method, path, **kwargs)
         response.raise_for_status()
         return response.json() if response.content else {}
 
@@ -250,6 +255,12 @@ class InternalApi:
 
     async def community_config(self) -> dict[str, Any]:
         return await self._request("GET", "/api/internal/tg/community/config")
+
+    async def community_eligibility(self, telegram_id: int) -> dict[str, Any]:
+        return await self._request(
+            "GET",
+            f"/api/internal/tg/community/eligibility/{telegram_id}",
+        )
 
     async def report_membership(
         self, telegram_id: int, *, group_id: str, is_member: bool

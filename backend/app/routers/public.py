@@ -1,3 +1,4 @@
+import os
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -32,6 +33,15 @@ class PasswordResetValidationRequest(BaseModel):
 @router.get("/health")
 def health() -> dict[str, bool]:
     return {"ok": True}
+
+
+@router.get("/version")
+def version() -> dict[str, str]:
+    return {
+        "version": os.getenv("BUILD_VERSION", "dev"),
+        "commit": os.getenv("BUILD_COMMIT", "unknown"),
+        "builtAt": os.getenv("BUILD_DATE", "unknown"),
+    }
 
 
 @router.get("/health/live")
@@ -71,6 +81,9 @@ def public_config(session: Session = Depends(get_session)) -> dict[str, Any]:
     public_settings["features"]["registration"] = bool(settings.registration_enabled and public_settings["features"].get("registration", True))
     public_settings["registrationEnabled"] = public_settings["features"]["registration"]
     public_settings["passwordMinLength"] = max(1, int(settings.portal_password_min_length))
+    telegram = public_settings.get("telegram")
+    if isinstance(telegram, dict):
+        telegram["botUsername"] = settings.telegram_bot_username or None
     return public_settings
 
 
@@ -120,12 +133,13 @@ def session_status(request: Request, session: Session = Depends(get_session)) ->
     except Exception:
         return {"authenticated": False, "admin": False}
 
-    if user is None or user.status not in {"active", "expired"}:
+    if user is None:
         return {"authenticated": False, "admin": False}
 
     return {
         "authenticated": True,
         "admin": user.role in {"admin", "root"} and user.status == "active",
+        "accountStatus": user.status,
         "status": user.status,
         "role": user.role,
     }

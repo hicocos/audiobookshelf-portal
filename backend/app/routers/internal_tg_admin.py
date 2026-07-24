@@ -28,7 +28,7 @@ from app.services.telegram_flows import (
     transition_flow_step,
 )
 from app.services.telegram_notifications import enqueue_notification
-from app.services.media_requests import MediaRequestLimitError, transition_open_media_request
+from app.services.media_requests import MediaRequestLimitError, media_request_status_label, transition_open_media_request
 from app.services.reconciliation import (
     enqueue_reconciliation_job,
     process_reconciliation_jobs,
@@ -338,6 +338,7 @@ def list_admin_requests(
                 "title": item.title,
                 "details": item.details,
                 "status": item.status,
+                "statusLabel": media_request_status_label(item.status),
                 "createdAt": item.created_at.isoformat(),
                 "username": (
                     session.get(PortalUser, item.portal_user_id).username
@@ -377,23 +378,28 @@ def update_admin_request(
             action=f"telegram.admin.media_request.{payload.status}",
             target_type="media_request",
             target_id=item.id,
+            detail_json=json.dumps({"note": item.admin_note}, ensure_ascii=False),
         )
     )
     session.commit()
     requester = session.get(PortalUser, item.portal_user_id)
     if requester and requester.telegram_id:
+        status_label = media_request_status_label(payload.status)
+        note = item.admin_note or "管理员未填写备注。"
+        next_step = {
+            "accepted": "管理员正在处理，请等待后续通知。",
+            "available": "内容已上架，请打开 Web 工单详情或媒体客户端查看。",
+            "rejected": "本次未采纳；如备注给出补充要求，可完善信息后重新提交。",
+        }[payload.status]
         enqueue_notification(
             session,
             dedupe_key=f"media-request-status:{item.id}:{payload.status}",
             telegram_id=requester.telegram_id,
             kind="media_request_status",
-            message=(
-                "您的工单已受理，请等待管理员处理。详细信息请到 Web 端查看。"
-                if payload.status == "accepted"
-                else "您的工单已经处理。详细信息请到 Web 端查看。"
-            ),
+            message=(f"你的有声书工单《{item.title}》状态已更新：{status_label}。\n"
+                     f"管理员备注：{note}\n下一步：{next_step}"),
         )
-    return {"ok": True, "status": item.status}
+    return {"ok": True, "status": item.status, "statusLabel": media_request_status_label(item.status)}
 
 
 @router.post("/requests/{request_id}/reply")

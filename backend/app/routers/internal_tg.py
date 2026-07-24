@@ -6,9 +6,8 @@ from typing import Any, Literal
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
-from sqlalchemy import func
 from sqlalchemy.exc import SQLAlchemyError
-from sqlmodel import Session, select
+from sqlmodel import Session
 
 from app.config import Settings
 from app.db import get_session
@@ -26,11 +25,28 @@ from app.services.account_lifecycle import preview_renewal, renew_user
 from app.services.codes import CodeValidationError, redeem_code, validate_code
 from app.services.expiry import disable_upstream_if_expired
 from app.services.password_reset import PasswordResetError, create_password_reset_token
+from app.services.provisioning import compensate_orphan_abs_user
 from app.services.referrals import settle_referral_reward
 from app.services.settings import get_public_settings
-from app.services.telegram_binding import TelegramBindingError, bind_telegram_user, get_user_by_telegram_id
-from app.services.telegram_flows import clear_flow, flow_payload, get_flow, public_flow, save_flow
+from app.services.telegram_binding import (
+    TelegramBindingError,
+    activate_binding_operation,
+    bind_telegram_user,
+    get_binding_operation,
+    get_user_by_telegram_id,
+    serialize_binding_operation,
+)
+from app.services.telegram_flows import (
+    clear_flow,
+    complete_flow,
+    flow_payload,
+    flow_state,
+    get_flow,
+    public_flow,
+    save_flow,
+)
 from app.services.telegram_notifications import acknowledge_notification, claim_notifications
+from app.services.usernames import archive_deleted_username, find_username_owner
 
 router = APIRouter(
     prefix="/api/internal/tg",
@@ -44,6 +60,7 @@ class BindRequest(BaseModel):
     code: str = Field(min_length=3, max_length=128)
     telegramId: str = Field(min_length=1, max_length=64)
     telegramUsername: str | None = Field(default=None, max_length=128)
+    operationId: str | None = Field(default=None, min_length=8, max_length=128)
 
 
 class TelegramIdRequest(BaseModel):
@@ -122,14 +139,22 @@ def _internal_user(user: PortalUser) -> dict[str, Any]:
     }
 
 
-def _bound_response(user: PortalUser, session: Session) -> dict[str, Any]:
+def _bound_response(
+    user: PortalUser,
+    session: Session,
+    *,
+    binding_operation: Any | None = None,
+) -> dict[str, Any]:
     public_settings = get_public_settings(session)
-    return {
+    response = {
         "bound": True,
         "user": _internal_user(user),
         "serverUrl": _server_url(session),
         "features": public_settings.get("telegram", {}),
     }
+    if binding_operation is not None:
+        response["bindingOperation"] = serialize_binding_operation(binding_operation)
+    return response
 
 
 def _bound_user_or_404(session: Session, telegram_id: str) -> PortalUser:
@@ -161,13 +186,8 @@ def _ensure_public_registration_allowed(session: Session, telegram_id: str) -> N
         raise HTTPException(status_code=409, detail="telegram account already bound")
 
 
-def _existing_active_username(session: Session, username: str) -> PortalUser | None:
-    existing = session.exec(
-        select(PortalUser).where(func.lower(PortalUser.username) == username.lower())
-    ).first()
-    if existing and existing.status != "deleted":
-        return existing
-    return None
+def _existing_username(session: Session, username: str) -> PortalUser | None:
+    return find_username_owner(session, username)
 
 
 @router.post("/flow/start")
@@ -183,7 +203,8 @@ def start_flow(payload: FlowStartRequest, session: Session = Depends(get_session
 
 @router.get("/flow/{telegram_id}")
 def current_flow(telegram_id: str, session: Session = Depends(get_session)) -> dict[str, Any]:
-    return public_flow(get_flow(session, telegram_id))
+    flow, phase = flow_state(session, telegram_id)
+    return public_flow(flow, phase=phase)
 
 
 @router.delete("/flow/{telegram_id}")
@@ -239,7 +260,8 @@ def check_register_username(payload: UsernameCheckRequest, session: Session = De
             raise CodeValidationError("registration flow expired")
     except CodeValidationError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    if _existing_active_username(session, payload.username) is not None:
+    existing = _existing_username(session, payload.username)
+    if existing is not None and existing.status != "deleted":
         raise HTTPException(status_code=409, detail="username already exists")
     flow = save_flow(
         session,
@@ -268,10 +290,8 @@ async def _register_account(
     telegram_id = telegram_id.strip()
     _ensure_public_registration_allowed(session, telegram_id)
 
-    existing = session.exec(
-        select(PortalUser).where(func.lower(PortalUser.username) == username.lower())
-    ).first()
-    if existing and existing.status != "deleted":
+    existing = _existing_username(session, username)
+    if existing is not None and existing.status != "deleted":
         raise HTTPException(status_code=409, detail="username already exists")
 
     password = _new_initial_password()
@@ -299,16 +319,9 @@ async def _register_account(
         raise HTTPException(status_code=502, detail="upstream media server user creation failed") from exc
 
     expires_at = None if code.duration_days == 0 else utcnow() + timedelta(days=code.duration_days)
-    if existing is not None:
-        user = existing
-        user.password_hash = hash_password(password)
-        user.abs_user_id = abs_user["id"]
-        user.abs_username = abs_user.get("username", username)
-        user.sync_normalized_usernames()
-        user.expires_at = expires_at
-        user.status = "active"
-        user.role = "user" if user.role == "admin" else user.role
-    else:
+    try:
+        if existing is not None:
+            archive_deleted_username(session, existing)
         user = PortalUser(
             username=username,
             password_hash=hash_password(password),
@@ -316,24 +329,22 @@ async def _register_account(
             abs_username=abs_user.get("username", username),
             expires_at=expires_at,
         )
-    user.telegram_id = telegram_id
-    user.telegram_username = (telegram_username or "").strip() or None
-    user.telegram_bound_at = utcnow()
-    user.telegram_binding_required = True
-    user.updated_at = utcnow()
-    session.add(user)
-    try:
+        user.telegram_id = telegram_id
+        user.telegram_username = (telegram_username or "").strip() or None
+        user.telegram_bound_at = utcnow()
+        user.telegram_binding_required = True
+        user.updated_at = utcnow()
+        session.add(user)
         session.commit()
     except SQLAlchemyError as exc:
         session.rollback()
-        try:
-            async with abs_factory() as abs_client:
-                await abs_client.delete_user(str(abs_user["id"]))
-        except Exception:  # noqa: BLE001 - log all failed compensation attempts
-            logger.exception(
-                "Failed to compensate ABS user after Telegram registration conflict abs_user_id=%s",
-                abs_user.get("id"),
-            )
+        await compensate_orphan_abs_user(
+            session,
+            abs_factory=abs_factory,
+            abs_user_id=str(abs_user["id"]),
+            username=username,
+            source="telegram_registration_commit_failure",
+        )
         raise HTTPException(status_code=409, detail="username or telegram account already exists") from exc
     session.refresh(user)
     try:
@@ -383,38 +394,8 @@ async def confirm_register(
         session=session,
         abs_factory=abs_factory,
     )
-    clear_flow(session, payload.telegramId)
+    complete_flow(session, payload.telegramId)
     return result
-
-
-async def _activate_required_binding(
-    user: PortalUser,
-    session: Session,
-    abs_factory: Any,
-) -> PortalUser:
-    if not user.telegram_binding_required or user.status != "pending":
-        return user
-    if user.abs_user_id:
-        try:
-            async with abs_factory() as abs_client:
-                await abs_client.update_user(user.abs_user_id, {"isActive": True})
-        except (httpx.HTTPError, TypeError, RuntimeError) as exc:
-            raise HTTPException(
-                status_code=502,
-                detail="Telegram 已绑定，但媒体账号暂未启用，请稍后重新打开 Bot 自动重试。",
-            ) from exc
-    now = utcnow()
-    if user.expires_at is not None:
-        current_expiry = _aware(user.expires_at)
-        created_at = _aware(user.created_at) or now
-        if current_expiry is not None:
-            user.expires_at = current_expiry + max(now - created_at, timedelta(0))
-    user.status = "active"
-    user.updated_at = now
-    session.add(user)
-    session.commit()
-    session.refresh(user)
-    return user
 
 
 @router.post("/bind")
@@ -430,12 +411,22 @@ async def bind(
             telegram_id=payload.telegramId,
             telegram_username=payload.telegramUsername,
             settings=Settings(),
+            operation_id=payload.operationId,
         )
     except TelegramBindingError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    user = await _activate_required_binding(user, session, abs_factory)
-    clear_flow(session, payload.telegramId)
-    return _bound_response(user, session)
+    operation = get_binding_operation(session, user)
+    if operation is None:
+        raise HTTPException(status_code=500, detail="binding operation was not created")
+    operation = await activate_binding_operation(
+        session,
+        user,
+        operation=operation,
+        abs_factory=abs_factory,
+    )
+    session.refresh(user)
+    complete_flow(session, payload.telegramId)
+    return _bound_response(user, session, binding_operation=operation)
 
 
 @router.get("/me/{telegram_id}")
@@ -448,10 +439,18 @@ async def me(
     if user is None:
         public_settings = get_public_settings(session)
         return {"bound": False, "features": public_settings.get("telegram", {})}
-    user = await _activate_required_binding(user, session, abs_factory)
+    operation = get_binding_operation(session, user)
+    if operation is not None and operation.phase != "completed":
+        operation = await activate_binding_operation(
+            session,
+            user,
+            operation=operation,
+            abs_factory=abs_factory,
+        )
+        session.refresh(user)
     await disable_upstream_if_expired(user, session, abs_factory)
     session.refresh(user)
-    return _bound_response(user, session)
+    return _bound_response(user, session, binding_operation=operation)
 
 
 @router.post("/open")
@@ -520,7 +519,7 @@ async def renew_confirm(
     except CodeValidationError as exc:
         status = 409 if str(exc) == "account already permanent" else 400
         raise HTTPException(status_code=status, detail=str(exc)) from exc
-    clear_flow(session, payload.telegramId)
+    complete_flow(session, payload.telegramId)
     return {
         "ok": True,
         "redeemedCode": result["redeemedCode"],

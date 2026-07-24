@@ -202,3 +202,45 @@ async def test_rejoin_does_not_override_a_later_manual_disable():
         assert joined.status == "member"
         assert user.status == "disabled"
         assert fake_abs.updates == []
+
+
+@pytest.mark.asyncio
+async def test_grace_sweep_queues_deduplicated_24h_and_6h_reminders():
+    engine = make_engine()
+    fake_abs = FakeAbsClient()
+    with Session(engine) as session:
+        user = seed_user(session)
+        membership = await report_group_membership(
+            session,
+            user,
+            group_id="-100123",
+            is_member=False,
+            grace_hours=72,
+            abs_factory=lambda: fake_abs,
+        )
+        membership.grace_expires_at = utcnow() + timedelta(hours=23)
+        session.add(membership)
+        session.commit()
+
+        await enforce_group_grace_periods(session, fake_abs)
+        await enforce_group_grace_periods(session, fake_abs)
+        reminders = session.exec(
+            select(TelegramNotification).where(
+                TelegramNotification.kind == "group_grace_reminder"
+            )
+        ).all()
+        assert len(reminders) == 1
+        assert "24 小时" in reminders[0].message
+
+        membership.grace_expires_at = utcnow() + timedelta(hours=5)
+        session.add(membership)
+        session.commit()
+        await enforce_group_grace_periods(session, fake_abs)
+        await enforce_group_grace_periods(session, fake_abs)
+        reminders = session.exec(
+            select(TelegramNotification).where(
+                TelegramNotification.kind == "group_grace_reminder"
+            ).order_by(TelegramNotification.created_at)
+        ).all()
+        assert len(reminders) == 2
+        assert "6 小时" in reminders[1].message

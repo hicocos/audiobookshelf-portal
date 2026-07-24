@@ -32,8 +32,8 @@ const fallback: PublicSettings = {
 
 export default function HomePage() {
   const [settings, setSettings] = useState<PublicSettings>(fallback);
-  const [authed, setAuthed] = useState<boolean | null>(null);
-  useEffect(() => { api.config().then(setSettings).catch(() => setSettings(fallback)); api.sessionStatus().then((r) => setAuthed(r.authenticated)).catch(() => setAuthed(false)); }, []);
+  const [session, setSession] = useState<{ authenticated: boolean; accountStatus?: string; status?: string } | null>(null);
+  useEffect(() => { api.config().then(setSettings).catch(() => setSettings(fallback)); api.sessionStatus().then(setSession).catch(() => setSession({ authenticated: false })); }, []);
 
   const benefits = settings.sections?.benefits?.length ? settings.sections.benefits : fallback.sections.benefits;
   const steps = settings.sections?.steps?.length ? settings.sections.steps : fallback.sections.steps;
@@ -43,6 +43,8 @@ export default function HomePage() {
   const heroSubtitle = (settings.copy.heroSubtitle || fallback.copy.heroSubtitle).trim();
   const heroNotice = (settings.copy.notice || fallback.copy.notice).trim();
   const supportUrl = settings.features?.showSupportEntry ? settings.links?.supportUrl?.trim() : '';
+  const authed = Boolean(session?.authenticated);
+  const pending = authed && (session?.accountStatus === 'pending' || session?.status === 'pending');
   const benefitIcons = [Library, Waves, ShieldCheck];
 
   return (
@@ -63,9 +65,14 @@ export default function HomePage() {
             <p className="mt-5 max-w-2xl text-2xl font-black leading-tight text-[var(--foreground)] sm:text-3xl">{heroSubtitle}</p>
             <p className="lede mt-4 max-w-xl">{heroNotice}</p>
             <div className="mt-7 flex flex-col gap-3 sm:flex-row">
-              {registrationOn && <Link href="/register" className="btn btn-primary w-full sm:w-auto">{settings.copy.primaryCta || '申请访问'} <ArrowUpRight size={17} /></Link>}
-              <Link href={authed ? '/dashboard' : '/login?next=/dashboard'} className="btn btn-secondary w-full sm:w-auto">{settings.copy.secondaryCta || '进入账号中心'}</Link>
+              {pending ? (
+                <Link href="/dashboard" className="btn btn-primary w-full sm:w-auto">继续绑定 Telegram <ArrowUpRight size={17} /></Link>
+              ) : registrationOn && !authed ? (
+                <Link href="/register" className="btn btn-primary w-full sm:w-auto">{settings.copy.primaryCta || '申请访问'} <ArrowUpRight size={17} /></Link>
+              ) : null}
+              {!pending && <Link href={authed ? '/dashboard' : '/login?next=/dashboard'} className="btn btn-secondary w-full sm:w-auto">{settings.copy.secondaryCta || '进入账号中心'}</Link>}
             </div>
+            {pending && <p className="mt-3 text-sm font-black text-[var(--primary)]">账号待启用，请完成 Telegram 绑定。</p>}
             {supportUrl && <a href={supportUrl} target="_blank" rel="noreferrer" className="mt-4 inline-flex items-center gap-2 text-sm font-black text-[var(--primary)] underline underline-offset-4">遇到问题？联系管理员 <ArrowUpRight size={14} /></a>}
           </div>
         </section>

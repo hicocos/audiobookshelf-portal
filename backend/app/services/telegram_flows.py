@@ -43,6 +43,23 @@ def get_flow(
     return flow
 
 
+def flow_state(session: Session, telegram_id: str) -> tuple[TelegramFlowSession | None, str]:
+    flow = session.exec(
+        select(TelegramFlowSession).where(
+            TelegramFlowSession.telegram_id == str(telegram_id).strip()
+        )
+    ).first()
+    if flow is None:
+        return None, "missing"
+    if flow.step == "completed":
+        return flow, "completed"
+    if _aware(flow.expires_at) <= utcnow():
+        session.delete(flow)
+        session.commit()
+        return None, "expired"
+    return flow, "active"
+
+
 def save_flow(
     session: Session,
     *,
@@ -95,6 +112,22 @@ def clear_flow(session: Session, telegram_id: str) -> bool:
     return True
 
 
+def complete_flow(session: Session, telegram_id: str) -> bool:
+    flow = session.exec(
+        select(TelegramFlowSession).where(
+            TelegramFlowSession.telegram_id == str(telegram_id).strip()
+        )
+    ).first()
+    if flow is None:
+        return False
+    flow.step = "completed"
+    flow.payload_json = "{}"
+    flow.updated_at = utcnow()
+    session.add(flow)
+    session.commit()
+    return True
+
+
 def transition_flow_step(
     session: Session,
     *,
@@ -115,9 +148,13 @@ def transition_flow_step(
     return result.rowcount == 1
 
 
-def public_flow(flow: TelegramFlowSession | None) -> dict[str, Any]:
+def public_flow(
+    flow: TelegramFlowSession | None, *, phase: str | None = None
+) -> dict[str, Any]:
     if flow is None:
-        return {"active": False}
+        return {"active": False, **({"phase": phase} if phase else {})}
+    if phase == "completed" or flow.step == "completed":
+        return {"active": False, "phase": "completed"}
     payload = flow_payload(flow)
     return {
         "active": True,

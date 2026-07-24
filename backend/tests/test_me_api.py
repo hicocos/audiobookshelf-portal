@@ -98,7 +98,7 @@ def test_me_returns_current_user_profile():
         teardown_client()
 
 
-def test_me_marks_portal_user_deleted_when_upstream_user_is_missing():
+def test_me_reports_upstream_user_missing_without_deleting_portal_identity():
     client, engine = make_client(FakeAbsClient([]))
     try:
         with Session(engine) as session:
@@ -108,15 +108,17 @@ def test_me_marks_portal_user_deleted_when_upstream_user_is_missing():
         response = client.get("/api/me", headers=user_headers(user_id))
 
         assert response.status_code == 200
-        assert response.json()["user"]["status"] == "deleted"
+        assert response.json()["user"]["status"] == "active"
+        assert response.json()["upstream"]["state"] == "missing"
         with Session(engine) as session:
             saved = session.get(PortalUser, user_id)
-            assert saved.status == "deleted"
+            assert saved.status == "active"
+            assert saved.upstream_state == "missing"
     finally:
         teardown_client()
 
 
-def test_me_marks_portal_user_disabled_when_upstream_user_is_disabled():
+def test_me_reports_upstream_disabled_without_overwriting_portal_holds():
     client, engine = make_client(FakeAbsClient([
         {"id": "abs-alice", "username": "alice", "isActive": False}
     ]))
@@ -128,10 +130,12 @@ def test_me_marks_portal_user_disabled_when_upstream_user_is_disabled():
         response = client.get("/api/me", headers=user_headers(user_id))
 
         assert response.status_code == 200
-        assert response.json()["user"]["status"] == "disabled"
+        assert response.json()["user"]["status"] == "active"
+        assert response.json()["upstream"]["state"] == "synced"
         with Session(engine) as session:
             saved = session.get(PortalUser, user_id)
-            assert saved.status == "disabled"
+            assert saved.status == "active"
+            assert saved.upstream_state == "synced"
     finally:
         teardown_client()
 

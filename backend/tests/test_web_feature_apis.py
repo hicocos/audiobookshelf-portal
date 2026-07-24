@@ -7,7 +7,7 @@ from sqlmodel import Session, SQLModel, create_engine, select
 
 from app.db import get_session
 from app.main import app
-from app.models import AppSetting, Code, PortalUser, utcnow
+from app.models import AppSetting, Code, PortalUser, ReferralInvite, utcnow
 from app.security import create_access_token
 
 
@@ -127,6 +127,32 @@ def test_user_can_check_in_create_referral_and_submit_request():
         assert created.json()["item"]["kind"] == "book"
         listed = client.get("/api/me/requests", headers=user_headers)
         assert listed.json()["items"][0]["title"] == "测试有声书"
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_referral_history_reports_disabled_code_instead_of_available():
+    client = make_client()
+    try:
+        with next(app.dependency_overrides[get_session]()) as session:
+            code = Code(code="DISABLED-REF", type="register", status="disabled")
+            session.add(code)
+            session.flush()
+            session.add(
+                ReferralInvite(
+                    inviter_user_id="user-id",
+                    code_id=code.id,
+                    reward_points=50,
+                    expires_at=utcnow() + timedelta(days=2),
+                )
+            )
+            session.commit()
+        response = client.get(
+            "/api/me/referrals", headers=headers("user-id", "user")
+        )
+        assert response.status_code == 200
+        assert response.json()["items"][0]["status"] == "disabled"
+        assert response.json()["items"][0]["used"] is False
     finally:
         app.dependency_overrides.clear()
 

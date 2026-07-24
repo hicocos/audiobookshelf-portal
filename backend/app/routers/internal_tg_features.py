@@ -9,7 +9,7 @@ from app.db import get_session
 from app.internal_auth import require_internal_bot
 from app.models import AuditLog, MediaRequest, PortalUser
 from app.routers.auth import ensure_user_can_login, get_abs_client_factory
-from app.services.community import report_group_membership
+from app.services.community import is_group_policy_applicable, report_group_membership
 from app.services.referrals import ReferralError, create_referral_invite
 from app.services.rewards import (
     RewardError,
@@ -20,7 +20,7 @@ from app.services.rewards import (
     set_leaderboard_opt_in,
 )
 from app.services.settings import get_public_settings
-from app.services.media_requests import MediaRequestLimitError, create_open_media_request
+from app.services.media_requests import MediaRequestDuplicateError, MediaRequestLimitError, create_open_media_request, media_request_status_label
 from app.services.telegram_admin import configured_admin_ids
 from app.services.telegram_binding import get_user_by_telegram_id
 from app.services.telegram_notifications import enqueue_notification
@@ -52,6 +52,7 @@ class ReferralRequest(TelegramRequest):
 class CreateMediaRequest(TelegramRequest):
     title: str = Field(min_length=1, max_length=200)
     details: str | None = Field(default=None, max_length=1000)
+    confirmDifferentVersion: bool = False
 
     @field_validator("title")
     @classmethod
@@ -183,6 +184,7 @@ def _serialize_request(item: MediaRequest) -> dict[str, Any]:
         "title": item.title,
         "details": item.details,
         "status": item.status,
+        "statusLabel": media_request_status_label(item.status),
         "adminNote": item.admin_note,
         "createdAt": item.created_at.isoformat(),
         "updatedAt": item.updated_at.isoformat(),
@@ -218,7 +220,14 @@ def create_media_request(
             portal_user_id=user.id,
             title=payload.title,
             details=payload.details,
+            confirm_different_version=payload.confirmDifferentVersion,
         )
+    except MediaRequestDuplicateError as exc:
+        raise HTTPException(status_code=409, detail={
+            "code": "duplicate_title", "message": str(exc),
+            "existingRequestId": exc.existing.id, "existingStatus": exc.existing.status,
+            "canConfirmDifferentVersion": True,
+        }) from exc
     except MediaRequestLimitError as exc:
         raise HTTPException(status_code=429, detail=str(exc)) from exc
     session.add(
@@ -255,9 +264,24 @@ def community_config(session: Session = Depends(get_session)) -> dict[str, Any]:
     features = _features(session)
     return {
         "enabled": bool(features.get("groupMembershipEnabled")),
+        "scope": str(features.get("groupPolicyScope") or "new_users_only"),
         "groupId": str(features.get("requiredGroupId") or ""),
         "inviteUrl": str(features.get("requiredGroupInviteUrl") or ""),
         "graceHours": int(features.get("groupGraceHours") or 72),
+    }
+
+
+@router.get("/community/eligibility/{telegram_id}")
+def community_eligibility(
+    telegram_id: str,
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    features = _features(session)
+    user = get_user_by_telegram_id(session, telegram_id)
+    return {
+        "bound": user is not None,
+        "applicable": bool(user and is_group_policy_applicable(user, features)),
+        "scope": "new_users_only",
     }
 
 
@@ -276,6 +300,14 @@ async def membership_report(
     user = get_user_by_telegram_id(session, payload.telegramId)
     if user is None:
         return {"enabled": True, "bound": False, "isMember": payload.isMember}
+    if not is_group_policy_applicable(user, features):
+        return {
+            "enabled": True,
+            "bound": True,
+            "applicable": False,
+            "isMember": payload.isMember,
+            "status": "exempt",
+        }
     membership = await report_group_membership(
         session,
         user,

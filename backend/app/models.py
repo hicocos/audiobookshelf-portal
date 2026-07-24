@@ -33,6 +33,8 @@ class PortalUser(SQLModel, table=True):
     telegram_binding_required: bool = False
     session_version: int = 0
     password_changed_at: datetime | None = None
+    upstream_state: str = Field(default="pending", index=True)
+    upstream_last_success_at: datetime | None = None
     role: str = "user"
     status: str = "active"
     abs_user_id: str | None = Field(default=None, unique=True)
@@ -66,6 +68,7 @@ class Code(SQLModel, table=True):
     type: str
     duration_days: int = 30
     max_uses: int = 1
+    per_user_max_uses: int = 1
     used_count: int = 0
     status: str = "active"
     designated_username: str | None = None
@@ -77,6 +80,15 @@ class Code(SQLModel, table=True):
 
 class CodeRedemption(SQLModel, table=True):
     __tablename__ = "code_redemptions"
+    __table_args__ = (
+        UniqueConstraint(
+            "code_id",
+            "portal_user_id",
+            "action",
+            "user_use_index",
+            name="ux_code_redemptions_user_use",
+        ),
+    )
 
     id: str = Field(default_factory=new_id, primary_key=True)
     code_id: str = Field(foreign_key="codes.id", ondelete="CASCADE", index=True)
@@ -88,6 +100,8 @@ class CodeRedemption(SQLModel, table=True):
     )
     username_snapshot: str
     action: str
+    operation_id: str | None = Field(default=None, index=True, unique=True)
+    user_use_index: int | None = None
     ip_address: str | None = None
     user_agent: str | None = None
     created_at: datetime = Field(default_factory=utcnow)
@@ -143,11 +157,40 @@ class TelegramNotification(SQLModel, table=True):
     message: str
     status: str = Field(default="pending", index=True)
     attempts: int = 0
+    version: int = 0
     next_attempt_at: datetime = Field(default_factory=utcnow, index=True)
     claimed_at: datetime | None = None
     sent_at: datetime | None = None
     last_error: str | None = None
     created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
+
+
+class AccountHold(SQLModel, table=True):
+    """An explicit, independently clearable reason an account cannot be active."""
+
+    __tablename__ = "account_holds"
+    __table_args__ = (
+        UniqueConstraint(
+            "portal_user_id",
+            "kind",
+            name="ux_account_holds_user_kind",
+        ),
+    )
+
+    id: str = Field(default_factory=new_id, primary_key=True)
+    portal_user_id: str = Field(
+        foreign_key="portal_users.id",
+        ondelete="CASCADE",
+        index=True,
+    )
+    kind: str = Field(index=True)
+    active: bool = Field(default=True, index=True)
+    started_at: datetime = Field(default_factory=utcnow)
+    cleared_at: datetime | None = None
+    actor: str | None = None
+    source: str
+    metadata_json: str | None = None
     updated_at: datetime = Field(default_factory=utcnow)
 
 
@@ -317,6 +360,54 @@ class ReconciliationJob(SQLModel, table=True):
     created_at: datetime = Field(default_factory=utcnow)
     updated_at: datetime = Field(default_factory=utcnow)
     succeeded_at: datetime | None = None
+
+
+class AccountOperation(SQLModel, table=True):
+    __tablename__ = "account_operations"
+
+    id: str = Field(default_factory=new_id, primary_key=True)
+    kind: str = Field(index=True)
+    portal_user_id: str | None = Field(
+        default=None,
+        foreign_key="portal_users.id",
+        ondelete="SET NULL",
+        index=True,
+    )
+    idempotency_key: str = Field(index=True, unique=True)
+    phase: str = Field(index=True)
+    status: str = Field(default="pending", index=True)
+    request_hash: str | None = None
+    result_json: str | None = None
+    last_error: str | None = None
+    reconciliation_job_id: str | None = Field(
+        default=None,
+        foreign_key="reconciliation_jobs.id",
+        ondelete="SET NULL",
+        index=True,
+    )
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
+    effective_at: datetime | None = Field(default=None, index=True)
+    completed_at: datetime | None = None
+
+
+class OperationPreview(SQLModel, table=True):
+    __tablename__ = "operation_previews"
+
+    id: str = Field(default_factory=new_id, primary_key=True)
+    kind: str = Field(index=True)
+    portal_user_id: str | None = Field(
+        default=None,
+        foreign_key="portal_users.id",
+        ondelete="CASCADE",
+        index=True,
+    )
+    operation_id: str = Field(index=True, unique=True)
+    payload_json: str
+    snapshot_hash: str
+    expires_at: datetime = Field(index=True)
+    consumed_at: datetime | None = None
+    created_at: datetime = Field(default_factory=utcnow)
 
 
 class AppSetting(SQLModel, table=True):

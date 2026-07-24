@@ -16,8 +16,10 @@ function ResetPasswordForm() {
   const [valid, setValid] = useState(false);
   const [loading, setLoading] = useState(false);
   const [completed, setCompleted] = useState(false);
+  const [botUsername, setBotUsername] = useState<string | null>(null);
 
   useEffect(() => {
+    api.config().then((settings) => setBotUsername(settings.telegram.botUsername || null)).catch(() => null);
     const fragment = new URLSearchParams(window.location.hash.replace(/^#/, ''));
     const fragmentToken = fragment.get('token') || '';
     window.history.replaceState({}, '', '/reset-password');
@@ -99,6 +101,10 @@ function ResetPasswordForm() {
           </label>
           <Button className="mt-6 w-full" loading={loading} loadingText="正在同步" onClick={submit}>确认重置密码</Button>
         </>
+      )}
+
+      {!valid && !completed && token === '' && botUsername && (
+        <a className="btn btn-primary mt-6 w-full" href={`https://t.me/${botUsername.replace(/^@/, '')}?start=reset_password`} target="_blank" rel="noreferrer">打开 @{botUsername.replace(/^@/, '')} 申请重置链接</a>
       )}
 
       <p className="mt-7 text-center text-sm text-[var(--muted-foreground)]">

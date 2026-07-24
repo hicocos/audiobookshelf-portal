@@ -1,12 +1,12 @@
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field, field_validator
 from sqlmodel import Session, select
 
 from app.auth_deps import get_current_claims, get_current_user_from_claims
 from app.db import get_session
-from app.models import Code, MediaRequest, PortalUser, ReferralInvite
+from app.models import Code, MediaRequest, PortalUser, ReferralInvite, utcnow
 from app.routers.auth import ensure_user_can_login, get_abs_client_factory
 from app.services.referrals import ReferralError, create_referral_invite
 from app.services.rewards import (
@@ -18,7 +18,7 @@ from app.services.rewards import (
     set_leaderboard_opt_in,
 )
 from app.services.settings import get_public_settings
-from app.services.media_requests import MediaRequestLimitError, create_open_media_request, transition_open_media_request
+from app.services.media_requests import MediaRequestDuplicateError, MediaRequestLimitError, create_open_media_request, media_request_status_label, transition_open_media_request
 from app.services.telegram_admin import configured_admin_ids
 from app.services.telegram_notifications import enqueue_notification
 
@@ -37,6 +37,7 @@ class LeaderboardOptInRequest(BaseModel):
 class CreateMediaRequest(BaseModel):
     title: str = Field(min_length=1, max_length=200)
     details: str | None = Field(default=None, max_length=1000)
+    confirmDifferentVersion: bool = False
 
     @field_validator("title")
     @classmethod
@@ -82,6 +83,7 @@ def _serialize_request(item: MediaRequest) -> dict[str, Any]:
         "title": item.title,
         "details": item.details,
         "status": item.status,
+        "statusLabel": media_request_status_label(item.status),
         "adminNote": item.admin_note,
         "createdAt": item.created_at.isoformat(),
         "updatedAt": item.updated_at.isoformat(),
@@ -90,10 +92,15 @@ def _serialize_request(item: MediaRequest) -> dict[str, Any]:
 
 @router.get("/rewards")
 def reward_summary(
+    cursor: str | None = Query(default=None, max_length=512),
+    limit: int = Query(default=10, ge=1, le=50),
     user: PortalUser = Depends(_user),
     session: Session = Depends(get_session),
 ) -> dict[str, Any]:
-    return points_summary(session, user)
+    try:
+        return points_summary(session, user, cursor=cursor, limit=limit)
+    except RewardError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.post("/checkin")
@@ -174,6 +181,16 @@ def referral_history(
                 "expiresAt": invite.expires_at.isoformat(),
                 "rewardPoints": invite.reward_points,
                 "used": invite.used_by_user_id is not None,
+                "status": (
+                    "used"
+                    if invite.used_by_user_id is not None
+                    else "disabled"
+                    if code is None or code.status != "active"
+                    else "expired"
+                    if invite.expires_at <= utcnow().replace(tzinfo=None)
+                    or (code.expires_at is not None and code.expires_at <= utcnow().replace(tzinfo=None))
+                    else "available"
+                ),
                 "settledAt": invite.settled_at.isoformat() if invite.settled_at else None,
                 "createdAt": invite.created_at.isoformat(),
             }
@@ -229,7 +246,14 @@ def create_request(
             portal_user_id=user.id,
             title=payload.title,
             details=payload.details,
+            confirm_different_version=payload.confirmDifferentVersion,
         )
+    except MediaRequestDuplicateError as exc:
+        raise HTTPException(status_code=409, detail={
+            "code": "duplicate_title", "message": str(exc),
+            "existingRequestId": exc.existing.id, "existingStatus": exc.existing.status,
+            "canConfirmDifferentVersion": True,
+        }) from exc
     except MediaRequestLimitError as exc:
         raise HTTPException(status_code=429, detail=str(exc)) from exc
     for telegram_id in configured_admin_ids():

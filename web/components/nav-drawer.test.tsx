@@ -33,6 +33,17 @@ describe('NavDrawer', () => {
     window.matchMedia = vi.fn().mockReturnValue({ matches: false });
   });
 
+  it('uses the same 1023px compact breakpoint as the drawer CSS', () => {
+    const matchMedia = vi.fn().mockReturnValue({ matches: true, addEventListener: vi.fn(), removeEventListener: vi.fn() });
+    window.matchMedia = matchMedia;
+
+    render(<DrawerHarness />);
+
+    expect(matchMedia).toHaveBeenCalledWith('(max-width: 1023px)');
+    expect(document.querySelector('#primary-nav-drawer')).toHaveAttribute('inert');
+    expect(document.querySelector('#primary-nav-drawer')).toHaveAttribute('aria-hidden', 'true');
+  });
+
   it('opens and closes as an accessible mobile drawer', async () => {
     window.matchMedia = vi.fn().mockReturnValue({ matches: true, addEventListener: vi.fn(), removeEventListener: vi.fn() });
     const user = userEvent.setup();

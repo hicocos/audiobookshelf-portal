@@ -50,6 +50,10 @@ def run_migrations(engine: Engine) -> None:
                 )
             if "password_changed_at" not in columns:
                 conn.execute(text("ALTER TABLE portal_users ADD COLUMN password_changed_at DATETIME"))
+            if "upstream_state" not in columns:
+                conn.execute(text("ALTER TABLE portal_users ADD COLUMN upstream_state VARCHAR NOT NULL DEFAULT 'pending'"))
+            if "upstream_last_success_at" not in columns:
+                conn.execute(text("ALTER TABLE portal_users ADD COLUMN upstream_last_success_at DATETIME"))
             if "username_normalized" not in columns:
                 conn.execute(text("ALTER TABLE portal_users ADD COLUMN username_normalized VARCHAR"))
             if "abs_username_normalized" not in columns:
@@ -213,6 +217,9 @@ def run_migrations(engine: Engine) -> None:
         conn.execute(text("CREATE INDEX IF NOT EXISTS ix_telegram_notifications_kind ON telegram_notifications(kind)"))
         conn.execute(text("CREATE INDEX IF NOT EXISTS ix_telegram_notifications_status ON telegram_notifications(status)"))
         conn.execute(text("CREATE INDEX IF NOT EXISTS ix_telegram_notifications_next_attempt_at ON telegram_notifications(next_attempt_at)"))
+        notification_columns = _sqlite_table_columns(conn, "telegram_notifications")
+        if "version" not in notification_columns:
+            conn.execute(text("ALTER TABLE telegram_notifications ADD COLUMN version INTEGER NOT NULL DEFAULT 0"))
         conn.execute(text("CREATE INDEX IF NOT EXISTS ix_telegram_notifications_delivery ON telegram_notifications(status, next_attempt_at)"))
 
         conn.execute(text("""
@@ -342,3 +349,87 @@ def run_migrations(engine: Engine) -> None:
         """))
         conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS ux_referral_invites_code ON referral_invites(code_id)"))
         conn.execute(text("CREATE INDEX IF NOT EXISTS ix_referral_invites_inviter_created ON referral_invites(inviter_user_id, created_at)"))
+
+        if _table_exists(conn, "codes"):
+            code_columns = _sqlite_table_columns(conn, "codes")
+            if "per_user_max_uses" not in code_columns:
+                conn.execute(text("ALTER TABLE codes ADD COLUMN per_user_max_uses INTEGER NOT NULL DEFAULT 1"))
+
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS account_holds (
+                id VARCHAR PRIMARY KEY,
+                portal_user_id VARCHAR NOT NULL REFERENCES portal_users(id) ON DELETE CASCADE,
+                kind VARCHAR NOT NULL,
+                active BOOLEAN NOT NULL DEFAULT 1,
+                actor VARCHAR,
+                source VARCHAR,
+                metadata_json VARCHAR,
+                started_at DATETIME NOT NULL,
+                cleared_at DATETIME,
+                created_at DATETIME NOT NULL,
+                updated_at DATETIME NOT NULL
+            )
+        """))
+        conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS ux_account_holds_user_kind ON account_holds(portal_user_id, kind)"))
+        conn.execute(text("CREATE INDEX IF NOT EXISTS ix_account_holds_active ON account_holds(active)"))
+
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS account_operations (
+                id VARCHAR PRIMARY KEY,
+                kind VARCHAR NOT NULL,
+                portal_user_id VARCHAR REFERENCES portal_users(id) ON DELETE SET NULL,
+                idempotency_key VARCHAR NOT NULL,
+                phase VARCHAR NOT NULL,
+                status VARCHAR NOT NULL DEFAULT 'pending',
+                request_hash VARCHAR,
+                result_json VARCHAR,
+                last_error VARCHAR,
+                reconciliation_job_id VARCHAR REFERENCES reconciliation_jobs(id) ON DELETE SET NULL,
+                created_at DATETIME NOT NULL,
+                updated_at DATETIME NOT NULL,
+                effective_at DATETIME,
+                completed_at DATETIME
+            )
+        """))
+        operation_columns = _sqlite_table_columns(conn, "account_operations")
+        if "effective_at" not in operation_columns:
+            conn.execute(text("ALTER TABLE account_operations ADD COLUMN effective_at DATETIME"))
+        conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS ux_account_operations_idempotency ON account_operations(idempotency_key)"))
+        conn.execute(text("CREATE INDEX IF NOT EXISTS ix_account_operations_kind_status ON account_operations(kind, status)"))
+        conn.execute(text("CREATE INDEX IF NOT EXISTS ix_account_operations_effective ON account_operations(effective_at)"))
+
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS operation_previews (
+                id VARCHAR PRIMARY KEY,
+                kind VARCHAR NOT NULL,
+                portal_user_id VARCHAR REFERENCES portal_users(id) ON DELETE CASCADE,
+                operation_id VARCHAR NOT NULL,
+                payload_json VARCHAR NOT NULL,
+                snapshot_hash VARCHAR NOT NULL,
+                expires_at DATETIME NOT NULL,
+                consumed_at DATETIME,
+                created_at DATETIME NOT NULL
+            )
+        """))
+        conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS ux_operation_previews_operation ON operation_previews(operation_id)"))
+        conn.execute(text("CREATE INDEX IF NOT EXISTS ix_operation_previews_expires ON operation_previews(expires_at)"))
+
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS audit_logs (
+                id VARCHAR PRIMARY KEY,
+                actor_user_id VARCHAR,
+                actor_username VARCHAR,
+                action VARCHAR NOT NULL,
+                target_type VARCHAR,
+                target_id VARCHAR,
+                detail_json VARCHAR,
+                ip_address VARCHAR,
+                created_at DATETIME NOT NULL
+            )
+        """))
+        audit_columns = _sqlite_table_columns(conn, "audit_logs")
+        for column in ("actor_user_id", "actor_username", "target_type", "target_id", "detail_json", "ip_address"):
+            if column not in audit_columns:
+                conn.execute(text(f"ALTER TABLE audit_logs ADD COLUMN {column} VARCHAR"))
+        conn.execute(text("CREATE INDEX IF NOT EXISTS ix_audit_logs_action_created ON audit_logs(action, created_at)"))
+        conn.execute(text("CREATE INDEX IF NOT EXISTS ix_audit_logs_actor_created ON audit_logs(actor_username, created_at)"))

@@ -16,6 +16,7 @@ from app.db import get_session
 from app.main import app
 from app.models import PortalUser, utcnow
 from app.routers.auth import get_abs_client_factory
+from app.routers.library import _safe_item_url
 from app.security import create_access_token, hash_password
 
 
@@ -173,6 +174,13 @@ def test_library_summary_allows_expired_user_into_portal():
         teardown_client()
 
 
+def test_safe_item_url_rejects_untrusted_bases_and_encodes_item_id():
+    assert _safe_item_url("http://listen.moyin.cc", "book-1") is None
+    assert _safe_item_url("https://user:pass@listen.moyin.cc", "book-1") is None
+    assert _safe_item_url("https://listen.moyin.cc", "../book 1") == "https://listen.moyin.cc/item/..%2Fbook%201"
+    assert _safe_item_url("https://listen.moyin.cc/base/", None) is None
+
+
 def test_library_summary_uses_authenticated_abs_user_for_portal_admin():
     """Portal-only admin ids must resolve to the ABS token owner via /api/me."""
     current_user = {
@@ -217,5 +225,6 @@ def test_library_summary_uses_authenticated_abs_user_for_portal_admin():
         assert response.json()["progress"][0]["title"] == "灵境行者"
         assert response.json()["progress"][0]["author"] == "卖报小郎君"
         assert response.json()["progress"][0]["narrator"] == "有声的紫襟"
+        assert response.json()["progress"][0]["openUrl"] == "https://listen.moyin.cc/item/book-1"
     finally:
         teardown_client()

@@ -1,0 +1,8 @@
+{
+  "schemaVersion": 1,
+  "versionEndpoint": "/api/public/version",
+  "buildEnvironment": ["BUILD_VERSION", "BUILD_COMMIT", "BUILD_DATE"],
+  "services": ["moyin-api", "moyin-web", "moyin-bot"],
+  "deployCommand": "./scripts/deploy.sh up",
+  "smokeCommand": "./scripts/deploy.sh smoke"
+}

@@ -2,7 +2,7 @@ import logging
 from typing import Any
 
 import httpx
-from telegram import Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.error import TimedOut
 from telegram.ext import ContextTypes
 
@@ -426,6 +426,11 @@ async def _redeem_points(update: Update, days: int, operation_id: str) -> None:
             http_error_detail(exc, "积分兑换失败。"),
             reply_markup=build_home_keyboard(),
         )
+    except (httpx.TimeoutException, httpx.NetworkError):
+        await update.effective_message.reply_text(
+            "请求超时或网络中断，操作结果待确认。为避免重复扣分，请不要重复提交；稍后查看积分与有效期状态。",
+            reply_markup=build_home_keyboard(),
+        )
 
 
 async def referral_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -464,9 +469,15 @@ async def recent_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     telegram_id, _username = telegram_identity(update)
     try:
         data = await API.recent_listening(telegram_id, limit=2)
+        buttons = [
+            [InlineKeyboardButton(f"继续收听：{str(item.get('title') or '未命名作品')[:24]}", url=str(item.get("openUrl")))]
+            for item in (data.get("progress") or [])[:2]
+            if str(item.get("openUrl") or "").startswith("https://")
+        ]
+        markup = InlineKeyboardMarkup(buttons) if buttons else build_home_keyboard()
         await update.effective_message.reply_text(
             format_recent_listening(data),
-            reply_markup=build_home_keyboard(),
+            reply_markup=markup,
         )
     except httpx.HTTPStatusError as exc:
         await update.effective_message.reply_text(
@@ -615,6 +626,14 @@ async def text_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     except httpx.HTTPStatusError:
         flow = {"active": False}
     step = flow.get("step") if flow.get("active") else None
+    phase = flow.get("phase")
+    if not flow.get("active") and phase in {"expired", "missing", "completed"}:
+        label = {"expired": "已过期", "missing": "不存在", "completed": "已完成"}[phase]
+        await update.effective_message.reply_text(
+            f"当前操作流程{label}，请从菜单重新开始。",
+            reply_markup=build_home_keyboard(),
+        )
+        return
     if step == "register_invite":
         await handle_register_invite(update, text)
         return

@@ -1,5 +1,6 @@
 from datetime import datetime, UTC
 from typing import Any
+from urllib.parse import quote, urlsplit, urlunsplit
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException
@@ -73,11 +74,31 @@ def _progress_title(item: dict[str, Any], items_by_id: dict[str, dict[str, Any]]
     return {"title": str(title), "author": str(author or ""), "narrator": str(narrator or "")}
 
 
-def _public_progress(item: dict[str, Any], items_by_id: dict[str, dict[str, Any]] | None = None) -> dict[str, Any]:
+def _safe_item_url(base_url: str | None, library_item_id: Any) -> str | None:
+    item_id = str(library_item_id or "").strip()
+    if not item_id or len(item_id) > 256:
+        return None
+    try:
+        parsed = urlsplit(str(base_url or "").strip())
+    except ValueError:
+        return None
+    if parsed.scheme != "https" or not parsed.netloc or parsed.username or parsed.password:
+        return None
+    base_path = parsed.path.rstrip("/")
+    return urlunsplit((parsed.scheme, parsed.netloc, f"{base_path}/item/{quote(item_id, safe='')}", "", ""))
+
+
+def _public_progress(
+    item: dict[str, Any],
+    items_by_id: dict[str, dict[str, Any]] | None = None,
+    *,
+    public_base_url: str | None = None,
+) -> dict[str, Any]:
     title_info = _progress_title(item, items_by_id or {})
     return {
         "id": item.get("id"),
         "libraryItemId": item.get("libraryItemId"),
+        "openUrl": _safe_item_url(public_base_url, item.get("libraryItemId")),
         "title": title_info["title"],
         "author": title_info["author"],
         "narrator": title_info["narrator"],
@@ -174,7 +195,16 @@ async def my_library_summary(
     return {
         "libraries": [_public_library(item) for item in libraries],
         "items": [_public_item(item) for item in sample_items],
-        "progress": [_public_progress(item, items_by_id) for item in recent],
+        "progress": [
+            _public_progress(
+                item,
+                items_by_id,
+                public_base_url=str(
+                    get_public_settings(session).get("client", {}).get("serverUrl") or ""
+                ),
+            )
+            for item in recent
+        ],
         "stats": {
             "libraryCount": len(libraries),
             "itemPreviewCount": len(sample_items),

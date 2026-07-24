@@ -60,6 +60,9 @@ services:
     env_file: .env.api
     environment:
       TZ: Asia/Shanghai
+      BUILD_VERSION: ${BUILD_VERSION:-dev}
+      BUILD_COMMIT: ${BUILD_COMMIT:-unknown}
+      BUILD_DATE: ${BUILD_DATE:-unknown}
     volumes:
       - moyin-data:/data
     ports:

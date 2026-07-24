@@ -19,6 +19,7 @@ class CreateCodesRequest(BaseModel):
     durationDays: int = Field(ge=0, le=3650)
     count: int = Field(default=1, gt=0, le=100)
     maxUses: int = Field(default=1, gt=0, le=10000)
+    perUserMaxUses: int = Field(default=1, gt=0, le=10000)
     expiresAt: datetime | None = None
     designatedUsername: str | None = None
     note: str | None = None
@@ -35,6 +36,7 @@ def serialize_code(code: Code) -> dict[str, Any]:
         "type": code.type,
         "durationDays": code.duration_days,
         "maxUses": code.max_uses,
+        "perUserMaxUses": code.per_user_max_uses,
         "usedCount": code.used_count,
         "status": code.status,
         "expiresAt": code.expires_at.isoformat() if code.expires_at else None,
@@ -56,6 +58,7 @@ def create_codes(
             type=payload.type,
             duration_days=payload.durationDays,
             max_uses=payload.maxUses,
+            per_user_max_uses=payload.perUserMaxUses,
             expires_at=payload.expiresAt,
             designated_username=payload.designatedUsername,
             note=payload.note,

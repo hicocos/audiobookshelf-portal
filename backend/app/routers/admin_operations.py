@@ -25,7 +25,8 @@ from app.routers.auth import get_abs_client_factory
 from app.services.inactivity import sync_inactive_users
 from app.services.rewards import RewardError, credit_points, debit_points
 from app.services.settings import get_public_settings
-from app.services.media_requests import MediaRequestLimitError, transition_open_media_request
+from app.services.media_requests import MediaRequestLimitError, media_request_status_label, transition_open_media_request
+from app.services.notification_retry import NotificationRetryError, retry_notification_safely
 from app.services.telegram_notifications import enqueue_notification
 from app.worker_health import worker_health_status
 
@@ -35,6 +36,10 @@ router = APIRouter(prefix="/api/admin/operations", tags=["admin-operations"])
 class RequestUpdate(BaseModel):
     status: Literal["accepted", "available", "rejected"]
     note: str | None = Field(default=None, max_length=500)
+
+
+class NotificationRetryRequest(BaseModel):
+    expectedVersion: int = Field(ge=0)
 
 
 class PointAdjustment(BaseModel):
@@ -115,6 +120,7 @@ def _serialize_request(session: Session, item: MediaRequest) -> dict[str, Any]:
         "title": item.title,
         "details": item.details,
         "status": item.status,
+        "statusLabel": media_request_status_label(item.status),
         "adminNote": item.admin_note,
         "createdAt": item.created_at.isoformat(),
         "updatedAt": item.updated_at.isoformat(),
@@ -165,14 +171,25 @@ def overview(
 @router.get("/requests")
 def list_requests(
     status: Literal["pending", "accepted", "available", "rejected"] | None = None,
+    limit: int = 100,
+    offset: int = 0,
     _claims: dict[str, Any] = Depends(require_admin),
     session: Session = Depends(get_session),
 ) -> dict[str, Any]:
-    statement = select(MediaRequest).order_by(MediaRequest.created_at.desc()).limit(100)
+    safe_limit, safe_offset = max(1, min(limit, 200)), max(0, offset)
+    statement = select(MediaRequest)
+    count_statement = select(func.count(MediaRequest.id))
     if status is not None:
         statement = statement.where(MediaRequest.status == status)
+        count_statement = count_statement.where(MediaRequest.status == status)
+    statement = statement.order_by(MediaRequest.created_at.desc(), MediaRequest.id.desc()).offset(safe_offset).limit(safe_limit)
     items = session.exec(statement).all()
-    return {"items": [_serialize_request(session, item) for item in items]}
+    return {
+        "items": [_serialize_request(session, item) for item in items],
+        "total": int(session.exec(count_statement).one()),
+        "limit": safe_limit,
+        "offset": safe_offset,
+    }
 
 
 @router.post("/requests/{request_id}")
@@ -207,16 +224,23 @@ def update_request(
     )
     session.commit()
     requester = session.get(PortalUser, item.portal_user_id)
+    status_label = media_request_status_label(payload.status)
+    default_next = {
+        "accepted": "管理员正在处理，请等待后续通知。",
+        "available": "内容已上架，请打开 Web 工单详情或媒体客户端查看。",
+        "rejected": "本次未采纳；如备注给出补充要求，可完善信息后重新提交。",
+    }[payload.status]
     if requester and requester.telegram_id:
+        note = item.admin_note or "管理员未填写备注。"
         enqueue_notification(
             session,
             dedupe_key=f"media-request-status:{item.id}:{payload.status}",
             telegram_id=requester.telegram_id,
             kind="media_request_status",
             message=(
-                "您的工单已受理，请等待管理员处理。详细信息请到 Web 端查看。"
-                if payload.status == "accepted"
-                else "您的工单已经处理。详细信息请到 Web 端查看。"
+                f"你的有声书工单《{item.title}》状态已更新：{status_label}。\n"
+                f"管理员备注：{note}\n"
+                f"下一步：{default_next}"
             ),
         )
     return {"item": _serialize_request(session, item)}
@@ -225,18 +249,23 @@ def update_request(
 @router.get("/notifications")
 def list_notifications(
     status: Literal["pending", "retry", "sending", "sent", "failed"] | None = None,
+    limit: int = 100,
+    offset: int = 0,
     _claims: dict[str, Any] = Depends(require_admin),
     session: Session = Depends(get_session),
 ) -> dict[str, Any]:
-    statement = (
-        select(TelegramNotification)
-        .order_by(TelegramNotification.created_at.desc())
-        .limit(100)
-    )
+    safe_limit, safe_offset = max(1, min(limit, 200)), max(0, offset)
+    statement = select(TelegramNotification)
+    count_statement = select(func.count(TelegramNotification.id))
     if status is not None:
         statement = statement.where(TelegramNotification.status == status)
+        count_statement = count_statement.where(TelegramNotification.status == status)
+    statement = statement.order_by(TelegramNotification.created_at.desc(), TelegramNotification.id.desc()).offset(safe_offset).limit(safe_limit)
     items = session.exec(statement).all()
     return {
+        "total": int(session.exec(count_statement).one()),
+        "limit": safe_limit,
+        "offset": safe_offset,
         "items": [
             {
                 "id": item.id,
@@ -245,6 +274,8 @@ def list_notifications(
                 "message": item.message,
                 "status": item.status,
                 "attempts": item.attempts,
+                "version": item.version,
+                "claimedAt": item.claimed_at.isoformat() if item.claimed_at else None,
                 "lastError": item.last_error,
                 "createdAt": item.created_at.isoformat(),
                 "sentAt": item.sent_at.isoformat() if item.sent_at else None,
@@ -257,31 +288,21 @@ def list_notifications(
 @router.post("/notifications/{notification_id}/retry")
 def retry_notification(
     notification_id: str,
+    payload: NotificationRetryRequest,
     claims: dict[str, Any] = Depends(require_admin),
     session: Session = Depends(get_session),
 ) -> dict[str, Any]:
-    item = session.get(TelegramNotification, notification_id)
-    if item is None:
-        raise HTTPException(status_code=404, detail="未找到该通知。")
-    if item.status == "sent":
-        raise HTTPException(status_code=409, detail="已发送的通知无需重试。")
-    item.status = "retry"
-    item.next_attempt_at = utcnow()
-    item.claimed_at = None
-    item.last_error = None
-    item.updated_at = utcnow()
-    session.add(item)
-    session.add(
-        AuditLog(
-            actor_user_id=str(claims.get("sub") or "") or None,
-            actor_username=str(claims.get("username") or "admin"),
-            action="admin.telegram_notification.retry",
-            target_type="telegram_notification",
-            target_id=item.id,
+    try:
+        item = retry_notification_safely(
+            session,
+            notification_id,
+            actor=str(claims.get("username") or "admin"),
+            expected_version=payload.expectedVersion,
         )
-    )
-    session.commit()
-    return {"ok": True, "status": item.status}
+    except NotificationRetryError as exc:
+        status = 404 if str(exc) == "notification not found" else 409
+        raise HTTPException(status_code=status, detail=str(exc)) from exc
+    return {"ok": True, "status": item.status, "version": item.version}
 
 
 @router.get("/broadcast/preview")
@@ -362,18 +383,23 @@ def create_broadcast(
 @router.get("/memberships")
 def list_memberships(
     status: Literal["member", "grace", "disabled"] | None = None,
+    limit: int = 100,
+    offset: int = 0,
     _claims: dict[str, Any] = Depends(require_admin),
     session: Session = Depends(get_session),
 ) -> dict[str, Any]:
-    statement = (
-        select(TelegramGroupMembership)
-        .order_by(TelegramGroupMembership.updated_at.desc())
-        .limit(100)
-    )
+    safe_limit, safe_offset = max(1, min(limit, 200)), max(0, offset)
+    statement = select(TelegramGroupMembership)
+    count_statement = select(func.count(TelegramGroupMembership.id))
     if status is not None:
         statement = statement.where(TelegramGroupMembership.status == status)
+        count_statement = count_statement.where(TelegramGroupMembership.status == status)
+    statement = statement.order_by(TelegramGroupMembership.updated_at.desc(), TelegramGroupMembership.id.desc()).offset(safe_offset).limit(safe_limit)
     items = session.exec(statement).all()
     return {
+        "total": int(session.exec(count_statement).one()),
+        "limit": safe_limit,
+        "offset": safe_offset,
         "items": [
             {
                 "id": item.id,
@@ -398,14 +424,28 @@ def list_memberships(
 @router.get("/audit")
 def list_audit(
     limit: int = 100,
+    offset: int = 0,
+    actor: str | None = None,
+    action: str | None = None,
+    targetType: str | None = None,
     _claims: dict[str, Any] = Depends(require_admin),
     session: Session = Depends(get_session),
 ) -> dict[str, Any]:
-    safe_limit = max(1, min(limit, 200))
-    items = session.exec(
-        select(AuditLog).order_by(AuditLog.created_at.desc()).limit(safe_limit)
-    ).all()
+    safe_limit, safe_offset = max(1, min(limit, 200)), max(0, offset)
+    statement, count_statement = select(AuditLog), select(func.count(AuditLog.id))
+    conditions = [
+        AuditLog.actor_username == actor if actor else None,
+        AuditLog.action == action if action else None,
+        AuditLog.target_type == targetType if targetType else None,
+    ]
+    for condition in conditions:
+        if condition is not None:
+            statement, count_statement = statement.where(condition), count_statement.where(condition)
+    items = session.exec(statement.order_by(AuditLog.created_at.desc(), AuditLog.id.desc()).offset(safe_offset).limit(safe_limit)).all()
     return {
+        "total": int(session.exec(count_statement).one()),
+        "limit": safe_limit,
+        "offset": safe_offset,
         "items": [
             {
                 "id": item.id,
@@ -413,7 +453,7 @@ def list_audit(
                 "action": item.action,
                 "targetType": item.target_type,
                 "targetId": item.target_id,
-                "detail": item.detail_json,
+                "detail": json.loads(item.detail_json) if item.detail_json else None,
                 "createdAt": item.created_at.isoformat(),
             }
             for item in items

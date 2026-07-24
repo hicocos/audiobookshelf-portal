@@ -28,15 +28,15 @@ export function NavDrawer<Key extends string>({
 }) {
   const [collapsed, setCollapsed] = useState(false);
   const [mobileOpen, setMobileOpen] = useState(false);
-  const [mobileViewport, setMobileViewport] = useState(false);
+  const [compactViewport, setCompactViewport] = useState(false);
   const drawerRef = useRef<HTMLElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const wasMobileOpenRef = useRef(false);
 
   useEffect(() => {
     setCollapsed(window.localStorage.getItem('moyin-nav-collapsed') === 'true');
-    const query = window.matchMedia('(max-width: 767px)');
-    const syncViewport = () => setMobileViewport(query.matches);
+    const query = window.matchMedia('(max-width: 1023px)');
+    const syncViewport = () => setCompactViewport(query.matches);
     syncViewport();
     query.addEventListener?.('change', syncViewport);
     return () => query.removeEventListener?.('change', syncViewport);
@@ -68,6 +68,11 @@ export function NavDrawer<Key extends string>({
         return;
       }
       if (event.key === 'Tab' && drawerRef.current) {
+        if (event.shiftKey && document.activeElement === drawerRef.current) {
+          event.preventDefault();
+          drawerRef.current.querySelector<HTMLElement>('.nav-drawer-mobile-close')?.focus();
+          return;
+        }
         const focusable = Array.from(
           drawerRef.current.querySelectorAll<HTMLElement>(
             'button:not([disabled]), a[href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
@@ -135,7 +140,8 @@ export function NavDrawer<Key extends string>({
         aria-label={ariaLabel}
         role={mobileOpen ? 'dialog' : undefined}
         aria-modal={mobileOpen || undefined}
-        inert={mobileViewport && !mobileOpen ? true : undefined}
+        inert={compactViewport && !mobileOpen ? true : undefined}
+        aria-hidden={compactViewport && !mobileOpen ? true : undefined}
         className={`nav-drawer ${mobileOpen ? 'is-open' : ''}`}
         data-collapsed={collapsed}
       >

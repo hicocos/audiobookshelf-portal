@@ -116,3 +116,25 @@ def test_valid_nested_patch_is_accepted_and_preserves_other_fields():
         assert settings["sections"]["faq"][0]["q"] == "问题"
     finally:
         teardown()
+
+
+def test_a06_group_policy_cannot_be_enabled_without_complete_prerequisites():
+    client = make_client()
+    try:
+        response = client.patch(
+            "/api/admin/settings/public",
+            headers=admin_headers(),
+            json={
+                "telegram": {
+                    "groupMembershipEnabled": True,
+                    "groupPolicyScope": "new_users_only",
+                    "requiredGroupId": "",
+                    "requiredGroupInviteUrl": "",
+                }
+            },
+        )
+
+        assert response.status_code == 422
+        assert "群组" in str(response.json())
+    finally:
+        teardown()

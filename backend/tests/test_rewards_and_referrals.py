@@ -20,6 +20,7 @@ from app.services.rewards import (
     credit_points,
     leaderboard,
     redeem_points_for_days,
+    points_summary,
     set_leaderboard_opt_in,
 )
 
@@ -229,3 +230,27 @@ def test_leaderboard_is_opt_in_and_masks_usernames():
         assert len(entries) == 1
         assert entries[0]["displayName"] == "a***e"
         assert entries[0]["lifetimeEarned"] == 20
+
+
+def test_points_summary_cursor_paginates_stably_and_exposes_reason_labels():
+    engine = _engine()
+    SQLModel.metadata.create_all(engine)
+    with Session(engine) as session:
+        user = _user("alice")
+        session.add(user)
+        session.commit()
+        now = utcnow()
+        for index, kind in enumerate(("daily_checkin", "referral_reward", "admin_adjustment")):
+            session.add(PointLedgerEntry(
+                id=f"ledger-{index}", portal_user_id=user.id, amount=10,
+                balance_after=(index + 1) * 10, kind=kind, reference=f"ref-{index}",
+                created_at=now - timedelta(minutes=index),
+            ))
+        session.commit()
+
+        first = points_summary(session, user, limit=2)
+        assert [item["reasonLabel"] for item in first["history"]] == ["每日签到", "邀请奖励"]
+        assert first["nextCursor"]
+        second = points_summary(session, user, limit=2, cursor=first["nextCursor"])
+        assert [item["reasonLabel"] for item in second["history"]] == ["管理员调整"]
+        assert second["nextCursor"] is None

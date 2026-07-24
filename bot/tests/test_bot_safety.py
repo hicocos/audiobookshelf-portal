@@ -15,7 +15,8 @@ from app.main import (
 from app.logging_config import JsonFormatter
 from app.health import check_bot_health, write_bot_heartbeat
 from app.notifications import notification_reply_markup, next_poll_delay
-from app.user_handlers import callback_menu
+from app.user_handlers import callback_menu, text_menu, _redeem_points
+from app.internal_api import InternalApi
 from app.community import required_group_handler
 
 
@@ -99,6 +100,61 @@ async def test_callback_answer_timeout_does_not_abort_requested_action(monkeypat
 
 
 @pytest.mark.asyncio
+async def test_internal_api_retries_safe_read_once_after_network_error():
+    api = InternalApi()
+    attempts = 0
+
+    class Client:
+        async def request(self, method, path, **kwargs):
+            nonlocal attempts
+            attempts += 1
+            request = httpx.Request(method, "http://internal" + path)
+            if attempts == 1:
+                raise httpx.ReadTimeout("slow read", request=request)
+            return httpx.Response(200, json={"ok": True}, request=request)
+
+    api._client = Client()
+    assert await api._request("GET", "/status") == {"ok": True}
+    assert attempts == 2
+
+
+@pytest.mark.asyncio
+async def test_write_timeout_warns_result_unknown_without_retry(monkeypatch):
+    update = FakeUpdate()
+    calls = 0
+
+    async def fail_write(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        raise httpx.ReadTimeout(
+            "unknown result", request=httpx.Request("POST", "http://internal/redeem")
+        )
+
+    monkeypatch.setattr("app.user_handlers.API.redeem_points", fail_write)
+    await _redeem_points(update, 1, "operation-123")
+    assert calls == 1
+    assert "结果待确认" in update.effective_message.replies[-1]
+    assert "不要重复提交" in update.effective_message.replies[-1]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("phase", "label"),
+    [("expired", "已过期"), ("missing", "不存在"), ("completed", "已完成")],
+)
+async def test_text_menu_explains_inactive_flow_phase(monkeypatch, phase, label):
+    update = FakeUpdate()
+    update.effective_message.text = "任意输入"
+
+    async def flow(_telegram_id):
+        return {"active": False, "phase": phase}
+
+    monkeypatch.setattr("app.user_handlers.API.flow", flow)
+    await text_menu(update, FakeContext())
+    assert label in update.effective_message.replies[-1]
+
+
+@pytest.mark.asyncio
 async def test_private_chat_guard_refuses_group_without_running_handler():
     update = FakeUpdate(ChatType.GROUP)
     called = False
@@ -145,6 +201,46 @@ async def test_bind_callback_bypasses_group_lookup_to_avoid_onboarding_deadlock(
     assert called is True
 
 
+class FakeCallbackQuery:
+    data = "request_start"
+
+    def __init__(self):
+        self.answered = False
+        self.message = FakeMessage()
+
+    async def answer(self, *_args, **_kwargs):
+        self.answered = True
+
+
+@pytest.mark.asyncio
+async def test_group_gate_acknowledges_blocked_callback_and_explains_grace_deadline():
+    update = FakeUpdate()
+    update.callback_query = FakeCallbackQuery()
+    update.effective_message = update.callback_query.message
+
+    async def handler(_update, _context):
+        raise AssertionError("blocked callback must not reach the action handler")
+
+    class Api:
+        async def community_config(self):
+            return {"enabled": True, "groupId": "-1004319046591", "inviteUrl": "https://t.me/moyinclub"}
+
+        async def report_membership(self, *_args, **_kwargs):
+            return {"bound": True, "status": "grace", "graceExpiresAt": "2026-07-24T00:00:00Z"}
+
+    class Bot:
+        async def get_chat_member(self, **_kwargs):
+            return type("Member", (), {"status": ChatMemberStatus.LEFT})()
+
+    context = FakeContext()
+    context.bot = Bot()
+    await required_group_handler(handler, Api())(update, context)
+
+    assert update.callback_query.answered is True
+    assert "Bot 功能已暂停" in update.effective_message.replies[-1]
+    assert "媒体账号宽限期至" in update.effective_message.replies[-1]
+
+
 @pytest.mark.asyncio
 async def test_non_member_in_account_grace_is_still_blocked_from_bot_features():
     update = FakeUpdate()
@@ -179,7 +275,43 @@ async def test_non_member_in_account_grace_is_still_blocked_from_bot_features():
     await required_group_handler(handler, Api())(update, context)
 
     assert called is False
-    assert update.effective_message.replies[-1] == "使用 Bot 前需要先加入指定群组。加入后请重新发送命令。"
+    assert "Bot 功能已暂停" in update.effective_message.replies[-1]
+    assert "媒体账号宽限期至 2026-07-24T00:00:00Z" in update.effective_message.replies[-1]
+
+
+@pytest.mark.asyncio
+async def test_a04_grandfathered_user_bypasses_group_gate_under_new_users_only_scope():
+    update = FakeUpdate()
+    called = False
+
+    async def handler(_update, _context):
+        nonlocal called
+        called = True
+
+    class Api:
+        async def community_config(self):
+            return {
+                "enabled": True,
+                "scope": "new_users_only",
+                "groupId": "-1004319046591",
+                "inviteUrl": "https://t.me/moyinclub",
+            }
+
+        async def community_eligibility(self, telegram_id):
+            assert telegram_id == 123
+            return {"bound": True, "applicable": False, "scope": "new_users_only"}
+
+    class Bot:
+        async def get_chat_member(self, **_kwargs):
+            raise AssertionError("grandfathered users must not be checked or blocked")
+
+    context = FakeContext()
+    context.bot = Bot()
+    context.bot_data = {}
+    await required_group_handler(handler, Api())(update, context)
+
+    assert called is True
+    assert update.effective_message.replies == []
 
 
 @pytest.mark.asyncio

@@ -6,7 +6,7 @@ from sqlmodel import Session, SQLModel, create_engine, select
 
 from app.db import get_session
 from app.main import app
-from app.models import AuditLog, PortalUser, utcnow
+from app.models import AuditLog, PortalUser, ReconciliationJob, utcnow
 from app.routers.auth import get_abs_client_factory
 from app.security import create_access_token, hash_password, verify_password
 
@@ -14,9 +14,15 @@ from app.security import create_access_token, hash_password, verify_password
 class FakeAbsClient:
     """In-memory stand-in for the upstream Audiobookshelf server."""
 
-    def __init__(self, users=None, fail: Exception | None = None):
+    def __init__(
+        self,
+        users=None,
+        fail: Exception | None = None,
+        fail_delete: Exception | None = None,
+    ):
         self.users = {u["id"]: dict(u) for u in (users or [])}
         self.fail = fail
+        self.fail_delete = fail_delete
         self.created: list[dict] = []
         self.updated: list[tuple[str, dict]] = []
         self.deleted: list[str] = []
@@ -51,6 +57,8 @@ class FakeAbsClient:
         return existing
 
     async def delete_user(self, user_id):
+        if self.fail_delete:
+            raise self.fail_delete
         if self.fail:
             raise self.fail
         self.deleted.append(user_id)
@@ -165,6 +173,40 @@ def test_create_user_creates_portal_and_upstream():
                 __import__("sqlmodel").select(PortalUser).where(PortalUser.username == "bob")
             ).first()
             assert saved is not None and saved.abs_user_id == "abs-bob"
+    finally:
+        teardown_client()
+
+
+def test_a08_admin_create_commit_failure_uses_durable_orphan_compensation():
+    fake = FakeAbsClient(fail_delete=RuntimeError("cleanup unavailable"))
+    client, engine, _ = make_client(fake)
+    try:
+        with Session(engine) as session:
+            seed_user(
+                session,
+                username="existing_abs_owner",
+                abs_id="abs-bob",
+            )
+
+        response = client.post(
+            "/api/admin/users",
+            headers=admin_headers(),
+            json={
+                "username": "bob",
+                "password": "StrongPassword-521",
+                "durationDays": 30,
+            },
+        )
+
+        assert response.status_code == 409, response.text
+        with Session(engine) as session:
+            job = session.exec(
+                select(ReconciliationJob).where(
+                    ReconciliationJob.target_type == "provisioning_orphan",
+                    ReconciliationJob.abs_user_id == "abs-bob",
+                )
+            ).one()
+            assert job.idempotency_key == "provision-cleanup:abs-bob"
     finally:
         teardown_client()
 
@@ -331,28 +373,47 @@ def test_deleted_users_hidden_from_list():
         teardown_client()
 
 
-def test_create_revives_soft_deleted_username():
+def test_create_reuses_soft_deleted_username_with_a_new_identity():
     client, engine, fake = make_client()
     try:
         with Session(engine) as session:
-            user = seed_user(session, username="revive", abs_id="abs-old")
+            user = seed_user(session, username="Revive", abs_id="abs-old")
             user.status = "deleted"
+            user.role = "root"
+            user.telegram_id = "legacy-telegram-id"
+            user.email = "legacy@example.com"
             session.add(user)
             session.commit()
             old_id = user.id
+            old_password_hash = user.password_hash
         resp = client.post(
             "/api/admin/users",
             headers=admin_headers(),
             json={"username": "revive", "password": "StrongPassword-521", "durationDays": 15},
         )
         assert resp.status_code == 200, resp.text
-        body = resp.json()["user"]
-        # same row reused (id preserved), status active again
-        assert body["id"] == old_id
-        assert body["status"] == "active"
-        # only one row for that username, and it is listed
-        data = client.get("/api/admin/users", headers=admin_headers()).json()
-        assert [u["username"] for u in data["users"]].count("revive") == 1
+        replacement = resp.json()["user"]
+        assert replacement["id"] != old_id
+        assert replacement["username"] == "revive"
+        assert replacement["role"] == "user"
+        assert fake.created[-1]["username"] == "revive"
+        with Session(engine) as session:
+            archived = session.get(PortalUser, old_id)
+            created = session.get(PortalUser, replacement["id"])
+            assert archived is not None
+            assert archived.username == f"__deleted__:{old_id}"
+            assert archived.abs_username == f"__deleted__:{old_id}"
+            assert archived.status == "deleted"
+            assert archived.role == "root"
+            assert archived.telegram_id == "legacy-telegram-id"
+            assert archived.email == "legacy@example.com"
+            assert archived.abs_user_id == "abs-old"
+            assert archived.password_hash == old_password_hash
+            assert created is not None
+            assert created.username == "revive"
+            assert created.role == "user"
+            assert created.telegram_id is None
+            assert created.email is None
     finally:
         teardown_client()
 
@@ -461,10 +522,22 @@ def test_bulk_extend_expiry_updates_only_finite_non_admin_users():
             session.add(admin)
             session.commit()
 
+        preview = client.post(
+            "/api/admin/users/bulk/expiry/preview",
+            headers=admin_headers(),
+            json={"extendDays": 7},
+        )
+        assert preview.status_code == 200, preview.text
+        preview_data = preview.json()
         resp = client.post(
             "/api/admin/users/bulk/expiry",
             headers=admin_headers(),
-            json={"extendDays": 7, "reason": "服务器波动补偿"},
+            json={
+                "extendDays": 7,
+                "reason": "服务器波动补偿",
+                "previewToken": preview_data["previewToken"],
+                "operationId": preview_data["operationId"],
+            },
         )
 
         assert resp.status_code == 200, resp.text

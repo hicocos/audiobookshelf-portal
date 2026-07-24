@@ -49,6 +49,23 @@ describe('ApiError', () => {
     });
   });
 
+  it('emits one centralized session-expired event for protected 401 responses only', async () => {
+    const listener = vi.fn();
+    window.addEventListener('moyin:session-expired', listener);
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: false,
+      status: 401,
+      text: async () => JSON.stringify({ detail: 'Invalid session' }),
+    }));
+
+    await expect(api.me()).rejects.toBeInstanceOf(ApiError);
+    await expect(api.rewards()).rejects.toBeInstanceOf(ApiError);
+    await expect(api.sessionStatus()).rejects.toBeInstanceOf(ApiError);
+
+    expect(listener).toHaveBeenCalledOnce();
+    window.removeEventListener('moyin:session-expired', listener);
+  });
+
   it('does not add JSON Content-Type to GET requests without a body', async () => {
     const fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 200, text: async () => '{}' });
     vi.stubGlobal('fetch', fetchMock);

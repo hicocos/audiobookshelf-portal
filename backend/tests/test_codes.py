@@ -3,7 +3,7 @@ from datetime import timedelta
 import pytest
 from sqlmodel import Session, SQLModel, create_engine
 
-from app.models import Code, utcnow
+from app.models import Code, PortalUser, utcnow
 from app.services.codes import CodeValidationError, generate_code, redeem_code
 
 
@@ -69,3 +69,59 @@ def test_redeem_code_rejects_expired_and_designated_mismatch():
             redeem_code(session, "ONLY-BOB", username="alice", action="register")
         with pytest.raises(CodeValidationError, match="expired"):
             redeem_code(session, "EXPIRED", username="alice", action="register")
+
+
+def test_a10_multi_user_renewal_code_defaults_to_one_use_per_user():
+    with make_session() as session:
+        alice = PortalUser(
+            id="alice-id",
+            username="alice",
+            password_hash="hash",
+            abs_username="alice",
+        )
+        bob = PortalUser(
+            id="bob-id",
+            username="bob",
+            password_hash="hash",
+            abs_username="bob",
+        )
+        code = Code(
+            code="TEAM-RENEW-01",
+            type="renew",
+            duration_days=30,
+            max_uses=5,
+        )
+        session.add(alice)
+        session.add(bob)
+        session.add(code)
+        session.commit()
+
+        redeem_code(
+            session,
+            code.code,
+            username=alice.username,
+            action="renew",
+            portal_user_id=alice.id,
+            operation_id="renew-alice-1",
+        )
+        with pytest.raises(CodeValidationError, match="already used by this user"):
+            redeem_code(
+                session,
+                code.code,
+                username=alice.username,
+                action="renew",
+                portal_user_id=alice.id,
+                operation_id="renew-alice-2",
+            )
+        redeem_code(
+            session,
+            code.code,
+            username=bob.username,
+            action="renew",
+            portal_user_id=bob.id,
+            operation_id="renew-bob-1",
+        )
+
+        session.refresh(code)
+        assert code.per_user_max_uses == 1
+        assert code.used_count == 2

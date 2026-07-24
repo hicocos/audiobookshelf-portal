@@ -64,6 +64,7 @@ DEFAULT_PUBLIC_SETTINGS: dict[str, Any] = {
         "lifecycleNotificationsEnabled": True,
         "adminEnabled": True,
         "groupMembershipEnabled": False,
+        "groupPolicyScope": "new_users_only",
         "requiredGroupId": "",
         "requiredGroupInviteUrl": "",
         "groupGraceHours": 72,

@@ -33,7 +33,7 @@ import {
   WordMark,
 } from '@/components/ui';
 import {
-  AdminLibraryOverview, AdminMembership, AdminNotification, AdminOperationsOverview, AdminUser, api, AuditEntry,
+  AdminLibraryOverview, AdminMembership, AdminNotification, AdminOperationsOverview, AdminUser, api, ApiError, AuditEntry,
   BroadcastAudience, BroadcastPreview, clearSession, CodeRecord, MediaRequestRecord, PublicSettings,
 } from '@/lib/api';
 import { DEFAULT_ADMIN_SETTINGS, hydrateAdminSettings } from '@/lib/admin-settings';
@@ -78,10 +78,10 @@ export default function AdminConfigPage() {
   const [accountQuery, setAccountQuery] = useState('');
   const [newUser, setNewUser] = useState({ username: '', password: '', durationDays: 30 });
   const [codes, setCodes] = useState<CodeRecord[]>([]);
-  const [codeForm, setCodeForm] = useState({ type: 'register', durationDays: 30, count: 5, maxUses: 1 });
+  const [codeForm, setCodeForm] = useState({ type: 'register', durationDays: 30, count: 5, maxUses: 1, perUserMaxUses: 1, expiresAt: '', designatedUsername: '', note: '' });
   const [bulkDays, setBulkDays] = useState(7);
   const [bulkReason, setBulkReason] = useState('服务器波动补偿');
-  const [bulkPreview, setBulkPreview] = useState<Awaited<ReturnType<typeof api.adminBulkExtendUserExpiryPreview>>['summary'] | null>(null);
+  const [bulkPreview, setBulkPreview] = useState<Awaited<ReturnType<typeof api.adminBulkExtendUserExpiryPreview>> | null>(null);
   const [operationsOverview, setOperationsOverview] = useState<AdminOperationsOverview | null>(null);
   const [requests, setRequests] = useState<MediaRequestRecord[]>([]);
   const [notifications, setNotifications] = useState<AdminNotification[]>([]);
@@ -294,8 +294,8 @@ export default function AdminConfigPage() {
   function deleteAccount(user: AdminUser) {
     setActionDialog({
       title: `删除账号 ${user.username}`,
-      body: '此操作会同步删除媒体服务器账号。请输入用户名确认，避免误删。',
-      confirmText: '永久删除',
+      body: '此操作会停用 Portal 账号并移除媒体服务器访问。Portal 中的账号、积分、工单、绑定与审计历史仍会保留，且该用户名以后不能重新注册。请输入用户名确认。',
+      confirmText: '停用并移除访问',
       danger: true,
       fields: [{ name: 'confirmation', label: `输入 ${user.username}`, required: true }],
       onSubmit: async ({ confirmation }) => {
@@ -326,7 +326,7 @@ export default function AdminConfigPage() {
     setBusy('bulk-preview');
     try {
       const response = await api.adminBulkExtendUserExpiryPreview({ extendDays: bulkDays });
-      setBulkPreview(response.summary);
+      setBulkPreview(response);
       setMessage(`预计为 ${response.summary.affected} 个账号增加 ${bulkDays} 天。`);
     } catch (error) {
       setMessage(error instanceof Error ? error.message : '批量补偿预览失败。');
@@ -339,7 +339,7 @@ export default function AdminConfigPage() {
     if (!bulkPreview) return;
     setActionDialog({
       title: '确认批量补偿',
-      body: `将给 ${bulkPreview.affected} 个账号增加 ${bulkDays} 天。原因：${bulkReason.trim() || '未填写'}。`,
+      body: `将给 ${bulkPreview.summary.affected} 个账号增加 ${bulkDays} 天。原因：${bulkReason.trim() || '未填写'}。`,
       confirmText: '确认执行',
       onSubmit: async () => {
         setActionDialog(null);
@@ -351,7 +351,13 @@ export default function AdminConfigPage() {
   async function performBulkExpiry() {
     setBusy('bulk-apply');
     try {
-      const response = await api.adminBulkExtendUserExpiry({ extendDays: bulkDays, reason: bulkReason.trim() || undefined });
+      if (!bulkPreview) throw new Error('批量预览已失效，请重新预览。');
+      const response = await api.adminBulkExtendUserExpiry({
+        extendDays: bulkDays,
+        reason: bulkReason.trim() || undefined,
+        previewToken: bulkPreview.previewToken,
+        operationId: bulkPreview.operationId,
+      });
       setBulkPreview(null);
       await refreshAccounts();
       setMessage(`批量补偿完成：更新 ${response.summary.updated} 个账号。`);
@@ -463,6 +469,17 @@ export default function AdminConfigPage() {
       setOperationsOverview(await api.adminOperationsOverview());
       setMessage('工单状态已更新，已绑定 Telegram 的用户会收到通知。');
     } catch (error) {
+      if (error instanceof ApiError && error.status === 409) {
+        try {
+          const latest = await api.adminRequests();
+          setRequests(latest.items);
+          setMessage('该工单已由其他管理员处理，列表已刷新。');
+          return;
+        } catch {
+          setMessage('该工单状态已变化，请刷新后查看最新处理结果。');
+          return;
+        }
+      }
       setMessage(error instanceof Error ? error.message : '工单更新失败。');
     } finally {
       setBusy('');
@@ -472,8 +489,8 @@ export default function AdminConfigPage() {
   async function retryNotification(item: AdminNotification) {
     setBusy(`notification-${item.id}`);
     try {
-      await api.adminRetryNotification(item.id);
-      setNotifications((current) => current.map((entry) => entry.id === item.id ? { ...entry, status: 'retry', lastError: null } : entry));
+      const result = await api.adminRetryNotification(item.id, item.version);
+      setNotifications((current) => current.map((entry) => entry.id === item.id ? { ...entry, status: 'retry', version: result.version, claimedAt: null, lastError: null } : entry));
       setMessage('通知已重新进入发送队列。');
     } catch (error) {
       setMessage(error instanceof Error ? error.message : '通知重试失败。');
@@ -775,7 +792,7 @@ export default function AdminConfigPage() {
                 </div>
                 {bulkPreview && (
                   <div className="mt-4 rounded-xl border border-[rgba(0,190,227,.25)] bg-[rgba(0,190,227,.08)] p-4 text-sm leading-6">
-                    预计修改 <b>{bulkPreview.affected}</b> 个账号；其中可恢复到期账号 <b>{bulkPreview.reactivatable}</b> 个，跳过管理员 <b>{bulkPreview.skippedAdmins}</b> 个。
+                    预计修改 <b>{bulkPreview.summary.affected}</b> 个账号；其中可恢复到期账号 <b>{bulkPreview.summary.reactivatable}</b> 个，跳过管理员 <b>{bulkPreview.summary.skippedAdmins}</b> 个。
                   </div>
                 )}
                 <div className="mt-5 grid grid-cols-2 gap-2">
@@ -820,11 +837,15 @@ export default function AdminConfigPage() {
           <div className="mt-5 grid gap-5">
             <Sheet className="rounded-[20px] p-6 sm:p-7">
               <SectionHeader eyebrow="卡密管理" title="邀请码与续期码" body="卡密统一在 Web 端生成、启停和删除，Telegram Bot 不提供生成命令。" />
-              <div className="mt-6 grid gap-4 sm:grid-cols-2 lg:grid-cols-5">
+              <div className="mt-6 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
                 <Select label="类型" value={codeForm.type} onChange={(value) => setCodeForm({ ...codeForm, type: value })} options={[["register", "注册邀请码"], ["renew", "续期码"]]} />
                 <NumberInput label="有效天数" value={codeForm.durationDays} min={0} max={3650} onChange={(value) => setCodeForm({ ...codeForm, durationDays: value })} />
                 <NumberInput label="生成数量" value={codeForm.count} min={1} max={100} onChange={(value) => setCodeForm({ ...codeForm, count: value })} />
-                <NumberInput label="每码使用次数" value={codeForm.maxUses} min={1} max={10000} onChange={(value) => setCodeForm({ ...codeForm, maxUses: value })} />
+                <NumberInput label="每码总次数" value={codeForm.maxUses} min={1} max={10000} onChange={(value) => setCodeForm({ ...codeForm, maxUses: value })} />
+                <NumberInput label="每用户最多次数" value={codeForm.perUserMaxUses} min={1} max={10000} onChange={(value) => setCodeForm({ ...codeForm, perUserMaxUses: value })} />
+                <Text label="指定用户名（可空）" value={codeForm.designatedUsername} onChange={(value) => setCodeForm({ ...codeForm, designatedUsername: value })} />
+                <Text label="失效时间（可空）" type="datetime-local" value={codeForm.expiresAt} onChange={(value) => setCodeForm({ ...codeForm, expiresAt: value })} />
+                <Text label="备注（可空）" value={codeForm.note} onChange={(value) => setCodeForm({ ...codeForm, note: value })} />
                 <div className="flex items-end"><Button variant="claret" className="w-full" loading={busy === 'create-codes'} loadingText="生成中" onClick={createCodes}><KeyRound size={15} /> 生成卡密</Button></div>
               </div>
             </Sheet>
@@ -857,7 +878,12 @@ export default function AdminConfigPage() {
                   <Panel key={item.id} className="rounded-[16px] p-4">
                     <div className="flex flex-wrap items-start justify-between gap-3"><div><p className="font-display text-lg font-semibold">{item.title}</p><p className="mt-1 text-xs text-[var(--muted-foreground)]">{item.username || '未知用户'} · {formatShanghaiDateTime(item.createdAt)}</p></div><span className="rounded-full tag-gold px-3 py-1 text-xs font-semibold">{requestStatusText[item.status] || item.status}</span></div>
                     {item.details && <p className="mt-3 text-sm leading-6 text-[var(--muted-foreground)]">{item.details}</p>}
-                    <div className="mt-4 flex flex-wrap gap-2"><SmallButton onClick={() => void updateMediaRequest(item, 'accepted')}>受理</SmallButton><SmallButton onClick={() => void updateMediaRequest(item, 'available')}>已上架</SmallButton><SmallButton danger onClick={() => void updateMediaRequest(item, 'rejected')}>拒绝</SmallButton></div>
+                    {item.adminNote && <p className="mt-3 rounded-xl bg-white/5 p-3 text-sm">处理结果：{item.adminNote}</p>}
+                    {['pending', 'accepted'].includes(item.status) ? (
+                      <div className="mt-4 flex flex-wrap gap-2"><SmallButton onClick={() => void updateMediaRequest(item, 'accepted')}>受理</SmallButton><SmallButton onClick={() => void updateMediaRequest(item, 'available')}>已上架</SmallButton><SmallButton danger onClick={() => void updateMediaRequest(item, 'rejected')}>拒绝</SmallButton></div>
+                    ) : (
+                      <p className="mt-4 text-xs text-[var(--muted-foreground)]">该工单已结束，不再提供处理操作。</p>
+                    )}
                   </Panel>
                 ))}
                 {!filteredRequests.length && <p className="py-7 text-center text-sm text-[var(--muted-foreground)]">当前筛选下暂无内容请求。</p>}
@@ -879,7 +905,7 @@ export default function AdminConfigPage() {
                 <div className="flex items-center justify-between gap-3"><h3 className="font-display text-xl font-semibold"><Bell className="mr-2 inline" size={19} />通知队列</h3><select className="field !min-h-10 !w-auto" value={notificationFilter} onChange={(event) => setNotificationFilter(event.target.value)}><option value="problem">待发 / 异常</option><option value="failed">失败</option><option value="retry">重试中</option><option value="pending">待发送</option><option value="sent">已发送</option><option value="all">全部</option></select></div>
                 <div className="mt-5 grid gap-3">
                   {filteredNotifications.slice(0, 30).map((item) => (
-                    <Panel key={item.id} className="rounded-[14px] p-4"><div className="flex items-start justify-between gap-3"><div className="min-w-0"><p className="truncate font-semibold">{item.kind}</p><p className="mt-1 line-clamp-2 text-xs text-[var(--muted-foreground)]">{item.message}</p></div><span className="text-xs">{item.status}</span></div>{item.lastError && <p className="mt-2 text-xs text-red-300">{item.lastError}</p>}{item.status !== 'sent' && <div className="mt-3"><SmallButton onClick={() => void retryNotification(item)}>重新发送</SmallButton></div>}</Panel>
+                    <Panel key={item.id} className="rounded-[14px] p-4"><div className="flex items-start justify-between gap-3"><div className="min-w-0"><p className="truncate font-semibold">{item.kind}</p><p className="mt-1 line-clamp-2 text-xs text-[var(--muted-foreground)]">{item.message}</p></div><span className="text-xs">{item.status}</span></div>{item.lastError && <p className="mt-2 text-xs text-red-300">{item.lastError}</p>}{['failed', 'retry'].includes(item.status) && <div className="mt-3"><SmallButton onClick={() => void retryNotification(item)}>重新发送</SmallButton></div>}{item.status === 'sending' && <p className="mt-2 text-xs text-amber-200">正在发送中，不能手工重试；过期 claim 将由安全恢复流程处理。</p>}</Panel>
                   ))}
                   {!filteredNotifications.length && <p className="py-7 text-center text-sm text-[var(--muted-foreground)]">当前筛选下暂无通知记录。</p>}
                 </div>

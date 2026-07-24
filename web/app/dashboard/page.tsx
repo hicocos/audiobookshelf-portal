@@ -65,6 +65,7 @@ export default function DashboardPage() {
   const [hasLoaded, setHasLoaded] = useState(false);
   const [redeeming, setRedeeming] = useState(false);
   const [popup, setPopup] = useState<{ title: string; body: string } | null>(null);
+  const [renewalPreview, setRenewalPreview] = useState<Awaited<ReturnType<typeof api.renewalPreview>> | null>(null);
   const [loggingOut, setLoggingOut] = useState(false);
 
   const [pwCurrent, setPwCurrent] = useState('');
@@ -72,6 +73,10 @@ export default function DashboardPage() {
   const [pwConfirm, setPwConfirm] = useState('');
   const [pwSaving, setPwSaving] = useState(false);
   const [tgBindToken, setTgBindToken] = useState<TelegramBindTokenResponse | null>(null);
+  const [tgSecondsLeft, setTgSecondsLeft] = useState(0);
+  const [community, setCommunity] = useState<{ membership: string; graceDeadline: string | null; policyScope: string; recoveryAction: string | null } | null>(null);
+  const [upstreamState, setUpstreamState] = useState<{ state: string; lastSuccessfulSyncAt: string | null } | null>(null);
+  const [optionalErrors, setOptionalErrors] = useState<Record<string, string>>({});
   const [tgSaving, setTgSaving] = useState(false);
   const [tgUnbindConfirm, setTgUnbindConfirm] = useState(false);
   const [requestAction, setRequestAction] = useState<{ item: MediaRequestRecord; action: 'cancel' | 'delete' } | null>(null);
@@ -96,13 +101,18 @@ export default function DashboardPage() {
       setSettings(loadedSettings);
       if (loadedUser) setUser(loadedUser);
       if (loadedCapabilities) setCapabilities(loadedCapabilities);
+      if (results[1].status === 'fulfilled') {
+        setCommunity(results[1].value.community || null);
+        setUpstreamState(results[1].value.upstream || null);
+      }
+      setOptionalErrors({});
       if (results[0].status === 'rejected') {
         setSettings(fallbackSettings);
       }
       if (results[1].status === 'rejected') {
         const error = results[1].reason;
         if (error instanceof ApiError && [401, 403].includes(error.status)) {
-          router.replace('/login?next=/dashboard');
+          router.replace(`/login?next=${encodeURIComponent(`${window.location.pathname}${window.location.search}`)}`);
           return;
         }
         setMessage(error instanceof Error ? error.message : '账号信息加载失败，请稍后重试。');
@@ -119,11 +129,19 @@ export default function DashboardPage() {
       if (loadedCapabilities) {
         const optional: Array<Promise<unknown>> = [];
         if (loadedCapabilities.canCheckin || loadedCapabilities.canRedeemPoints || loadedCapabilities.canRefer || loadedCapabilities.canViewLeaderboard) {
-          optional.push(api.rewards().then(setRewards));
+          optional.push(api.rewards().then(setRewards).catch((error) => {
+            setOptionalErrors((current) => ({ ...current, rewards: error instanceof Error ? error.message : '积分数据暂时无法加载。' }));
+          }));
         }
-        if (loadedCapabilities.canRefer) optional.push(api.referrals().then((value) => setReferrals(value.items)));
-        if (loadedCapabilities.canRequest) optional.push(api.mediaRequests().then((value) => setRequests(value.items)));
-        if (loadedCapabilities.canViewLeaderboard) optional.push(api.leaderboard().then((value) => setLeaderboard(value.entries)));
+        if (loadedCapabilities.canRefer) optional.push(api.referrals().then((value) => setReferrals(value.items)).catch((error) => {
+          setOptionalErrors((current) => ({ ...current, referrals: error instanceof Error ? error.message : '邀请记录暂时无法加载。' }));
+        }));
+        if (loadedCapabilities.canRequest) optional.push(api.mediaRequests().then((value) => setRequests(value.items)).catch((error) => {
+          setOptionalErrors((current) => ({ ...current, requests: error instanceof Error ? error.message : '工单暂时无法加载。' }));
+        }));
+        if (loadedCapabilities.canViewLeaderboard) optional.push(api.leaderboard().then((value) => setLeaderboard(value.entries)).catch((error) => {
+          setOptionalErrors((current) => ({ ...current, leaderboard: error instanceof Error ? error.message : '排行榜暂时无法加载。' }));
+        }));
         await Promise.allSettled(optional);
       }
     } finally {
@@ -142,6 +160,37 @@ export default function DashboardPage() {
     if (saved && ['account', 'rewards', 'requests', 'guide', 'records'].includes(saved)) setTab(saved as Tab);
   }, []);
   useEffect(() => { window.sessionStorage.setItem('moyin-dashboard-tab', tab); }, [tab]);
+  useEffect(() => {
+    if (!tgBindToken) { setTgSecondsLeft(0); return; }
+    const update = () => setTgSecondsLeft(Math.max(0, Math.ceil((new Date(tgBindToken.expiresAt).getTime() - Date.now()) / 1000)));
+    update();
+    const timer = window.setInterval(update, 1000);
+    return () => window.clearInterval(timer);
+  }, [tgBindToken]);
+  useEffect(() => {
+    if (!tgBindToken || user?.telegramBound) return;
+    let stopped = false;
+    const check = async () => {
+      if (document.visibilityState === 'hidden' || stopped) return;
+      try {
+        const result = await api.telegramBindingStatus();
+        if (result.user) setUser(result.user);
+        if (result.bound && result.phase === 'completed') {
+          setTgBindToken(null);
+          setPopup({ title: 'Telegram 绑定完成', body: '账号已绑定并完成启用。' });
+        } else if (result.phase === 'activation_pending') {
+          setMessage('Telegram 已绑定，媒体账号正在启用；请勿重复生成绑定码。');
+        } else if (result.phase === 'expired') {
+          setMessage('绑定码已过期，请重新生成。');
+        }
+      } catch {
+        // Keep the current code visible; the user can also press the refresh button.
+      }
+    };
+    const timer = window.setInterval(() => void check(), 5000);
+    void check();
+    return () => { stopped = true; window.clearInterval(timer); };
+  }, [tgBindToken, user?.telegramBound]);
 
   async function redeem() {
     if (redeeming) return;
@@ -149,19 +198,10 @@ export default function DashboardPage() {
     setMessage('');
     setRedeeming(true);
     try {
-      const r = await api.redeem(code.trim());
-      setUser(r.user);
+      const preview = await api.renewalPreview(code.trim());
+      setRenewalPreview(preview);
       setCode('');
-      const nowPermanent = r.user?.expiresAt == null;
-      setPopup({
-        title: r.upstreamReactivated === false ? '续期已记录' : '续期成功',
-        body: r.upstreamReactivated === false
-          ? (r.message || '续期已记录，但媒体账号恢复失败，请联系管理员；不要重复兑换续期码。')
-          : nowPermanent
-            ? '续期成功，你的账号现在为永久有效。媒体账号已恢复。'
-            : `续期成功，新的有效期至 ${formatShanghaiDateTime(r.user!.expiresAt!)}，媒体账号已恢复。`,
-      });
-      setMessage(r.message || '续期成功，新的有效期已更新。');
+      setMessage('续期预览已生成，请核对后确认。');
     } catch (err) {
       const text = err instanceof Error ? err.message : '兑换失败';
       // Already-permanent and wrong-purpose cases surface as a popup so the
@@ -170,6 +210,27 @@ export default function DashboardPage() {
         setPopup({ title: '无法续期', body: text });
       }
       setMessage(text);
+    } finally {
+      setRedeeming(false);
+    }
+  }
+
+  async function confirmRenewal() {
+    if (!renewalPreview || redeeming) return;
+    setRedeeming(true);
+    try {
+      const r = await api.renewalConfirm(renewalPreview.previewToken, renewalPreview.operationId);
+      setRenewalPreview(null);
+      setUser(r.user);
+      const nowPermanent = r.user.expiresAt == null;
+      setPopup({
+        title: r.upstreamReactivated === false ? '续期已记录' : '续期成功',
+        body: r.upstreamReactivated === false
+          ? (r.message || '续期已记录，但媒体账号恢复失败，请联系管理员；不要重复兑换续期码。')
+          : nowPermanent ? '续期成功，你的账号现在为永久有效。' : `新的有效期至 ${formatShanghaiDateTime(r.user.expiresAt!)}`,
+      });
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : '续期确认失败。');
     } finally {
       setRedeeming(false);
     }
@@ -221,6 +282,18 @@ export default function DashboardPage() {
       setMessage(err instanceof Error ? err.message : '生成 Telegram 绑定码失败');
     } finally {
       setTgSaving(false);
+    }
+  }
+
+  async function retryOptionalModule(module: 'rewards' | 'referrals' | 'requests' | 'leaderboard') {
+    setOptionalErrors((current) => { const next = { ...current }; delete next[module]; return next; });
+    try {
+      if (module === 'rewards') setRewards(await api.rewards());
+      if (module === 'referrals') setReferrals((await api.referrals()).items);
+      if (module === 'requests') setRequests((await api.mediaRequests()).items);
+      if (module === 'leaderboard') setLeaderboard((await api.leaderboard()).entries);
+    } catch (error) {
+      setOptionalErrors((current) => ({ ...current, [module]: error instanceof Error ? error.message : '数据暂时无法加载。' }));
     }
   }
 
@@ -392,8 +465,8 @@ export default function DashboardPage() {
   const showRequests = Boolean(capabilities?.canRequest);
   useEffect(() => {
     if (
-      (tab === 'rewards' && !showRewards)
-      || (tab === 'requests' && !showRequests)
+      (tab === 'rewards' && capabilities != null && !showRewards)
+      || (tab === 'requests' && capabilities != null && !showRequests)
       || (tab === 'records' && capabilities != null && !capabilities.canListen)
     ) {
       setTab('account');
@@ -471,6 +544,15 @@ export default function DashboardPage() {
 
             {user?.telegramBindingRequired && !user.telegramBound && (
               <StatusNote tone="warning">你的账号处于待启用状态：必须先绑定 Telegram Bot，完成后系统会自动启用听书权限。绑定前不会扣减有效期。</StatusNote>
+            )}
+
+            {community && ['grace', 'disabled'].includes(community.membership) && (
+              <StatusNote tone="warning">
+                群资格：{community.membership === 'grace' ? `宽限期至 ${community.graceDeadline ? formatShanghaiDateTime(community.graceDeadline) : '待确认'}` : '已因离群停用'}。{community.recoveryAction || '重新加入必需群组后刷新页面。'}
+              </StatusNote>
+            )}
+            {upstreamState?.state === 'unavailable' && (
+              <StatusNote tone="warning">媒体服务暂时无法确认；页面显示的是 Portal 账号状态，请稍后刷新。</StatusNote>
             )}
 
             <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
@@ -562,7 +644,13 @@ export default function DashboardPage() {
                           <CopyButton text={tgBindToken.command} label="复制命令" />
                         </div>
                         {tgBindToken.botUsername && <a className="btn btn-primary mt-3 w-full" href={`https://t.me/${tgBindToken.botUsername.replace(/^@/, '')}?start=bind_${encodeURIComponent(tgBindToken.code)}`} target="_blank" rel="noreferrer"><Send size={15} /> 一键打开 Bot 并绑定</a>}
-                        <p className="mt-3 text-xs text-[var(--muted-foreground)]">有效期至：{formatShanghaiDateTime(tgBindToken.expiresAt)}</p>
+                        <p className="mt-3 text-xs text-[var(--muted-foreground)]">有效期至：{formatShanghaiDateTime(tgBindToken.expiresAt)} · 剩余 {String(Math.floor(tgSecondsLeft / 60)).padStart(2, '0')}:{String(tgSecondsLeft % 60).padStart(2, '0')}{typeof tgBindToken.attemptsRemaining === 'number' ? ` · 剩余尝试 ${tgBindToken.attemptsRemaining} 次` : ''}</p>
+                        <Button variant="secondary" className="mt-3 w-full" onClick={async () => {
+                          const result = await api.telegramBindingStatus();
+                          if (result.user) setUser(result.user);
+                          if (result.bound && result.phase === 'completed') setTgBindToken(null);
+                          setMessage(result.bound ? (result.phase === 'completed' ? '绑定已完成。' : '绑定已保存，媒体账号正在启用。') : result.phase === 'expired' ? '绑定码已过期，请重新生成。' : '尚未检测到绑定，请先在 Bot 中发送绑定命令。');
+                        }}>我已完成，刷新状态</Button>
                         {tgBindToken.botUsername && <p className="mt-1 text-xs text-[var(--muted-foreground)]">Bot：@{tgBindToken.botUsername}</p>}
                       </div>
                     )}
@@ -574,14 +662,15 @@ export default function DashboardPage() {
             <Sheet className="rounded-[20px] p-6 sm:p-8">
               <SectionHeader eyebrow="账号安全" title="修改密码" body="新密码会同步到听书客户端。修改后，请在客户端使用新密码重新登录。用户名不区分大小写。" />
               <div className="mt-6 grid gap-3 sm:grid-cols-3">
-                <input className="field" type="password" autoComplete="current-password" placeholder="当前密码"
-                  value={pwCurrent} onChange={(e) => setPwCurrent(e.target.value)} />
-                <input className="field" type="password" autoComplete="new-password" placeholder={`新密码（${minPwLength}–18 位）`} minLength={minPwLength} maxLength={18}
-                  value={pwNext} onChange={(e) => setPwNext(e.target.value)} />
-                <input className="field" type="password" autoComplete="new-password" placeholder="确认新密码" maxLength={18}
+                <label htmlFor="current-password"><span className="mb-2 block text-sm font-black">当前密码</span><input id="current-password" className="field" type="password" autoComplete="current-password" placeholder="输入当前密码"
+                  value={pwCurrent} onChange={(e) => setPwCurrent(e.target.value)} /></label>
+                <label htmlFor="new-password"><span className="mb-2 block text-sm font-black">新密码</span><input id="new-password" aria-describedby="password-rules" className="field" type="password" autoComplete="new-password" placeholder={`${minPwLength}–18 位`} minLength={minPwLength} maxLength={18}
+                  value={pwNext} onChange={(e) => setPwNext(e.target.value)} /></label>
+                <label htmlFor="confirm-password"><span className="mb-2 block text-sm font-black">确认新密码</span><input id="confirm-password" className="field" type="password" autoComplete="new-password" placeholder="再次输入新密码" maxLength={18}
                   value={pwConfirm} onChange={(e) => setPwConfirm(e.target.value)}
-                  onKeyDown={(e) => { if (e.key === 'Enter') void changePassword(); }} />
+                  onKeyDown={(e) => { if (e.key === 'Enter') void changePassword(); }} /></label>
               </div>
+              <p id="password-rules" className="mt-2 text-xs text-[var(--muted-foreground)]">新密码长度为 {minPwLength}–18 位。</p>
               <div className="mt-4 flex justify-end">
                 <Button variant="claret" loading={pwSaving} loadingText="保存中"
                   disabled={!pwCurrent || !pwNext || !pwConfirm} onClick={changePassword}>
@@ -609,12 +698,16 @@ export default function DashboardPage() {
                 <SectionHeader eyebrow="用户权益" title="签到、积分与邀请" body="每天签到积累积分，可兑换账号有效期；邀请好友注册成功后也会获得奖励。" />
                 {capabilities?.canCheckin && <Button variant="claret" loading={featureBusy === 'checkin'} loadingText="签到中" onClick={checkin}><Sparkles size={16} /> 今日签到</Button>}
               </div>
+              {optionalErrors.rewards ? (
+                <StatusNote tone="warning">积分数据暂时无法加载：{optionalErrors.rewards} <button type="button" className="underline" aria-label="重试积分数据" onClick={() => void retryOptionalModule('rewards')}>重试</button></StatusNote>
+              ) : (
               <div className="mt-7 grid grid-cols-2 gap-3 lg:grid-cols-4">
                 <Stat label="当前积分" value={`${rewards?.balance ?? 0}`} />
                 <Stat label="累计获得" value={`${rewards?.lifetimeEarned ?? 0}`} />
                 <Stat label="连续签到" value={`${rewards?.streak ?? 0} 天`} />
                 <Stat label="上次签到" value={rewards?.lastCheckinDate || '尚未签到'} />
               </div>
+              )}
             </Sheet>
 
             <div className="grid gap-5 lg:grid-cols-2">
@@ -622,9 +715,10 @@ export default function DashboardPage() {
                 <Sheet className="rounded-[20px] p-6 sm:p-8">
                   <SectionHeader eyebrow="积分续期" title="兑换有效期" body={`每 ${settings?.telegram.pointsPerDay ?? 100} 积分可兑换 1 天，单次最多 ${settings?.telegram.maxRedeemDays ?? 30} 天。`} />
                   <div className="mt-6 grid gap-3 sm:grid-cols-[1fr_auto]">
-                    <input className="field" type="number" min={1} max={settings?.telegram.maxRedeemDays ?? 30} value={redeemDays} onChange={(event) => setRedeemDays(Number(event.target.value))} />
+                    <label htmlFor="redeem-days"><span className="mb-2 block text-sm font-black">兑换天数</span><input id="redeem-days" aria-describedby="redeem-days-help" className="field" type="number" min={1} max={settings?.telegram.maxRedeemDays ?? 30} value={redeemDays} onChange={(event) => setRedeemDays(Number(event.target.value))} /></label>
                     <Button variant="claret" loading={featureBusy === 'redeem-points'} loadingText="兑换中" onClick={redeemRewardDays}><Gift size={16} /> 兑换天数</Button>
                   </div>
+                  <p id="redeem-days-help" className="mt-2 text-xs text-[var(--muted-foreground)]">请输入 1–{settings?.telegram.maxRedeemDays ?? 30} 天。</p>
                 </Sheet>
               )}
 
@@ -657,7 +751,7 @@ export default function DashboardPage() {
                     {referrals.map((item) => (
                       <Panel key={item.id} className="rounded-[14px] p-4">
                         <div className="flex items-start justify-between gap-3"><code className="break-all font-mono font-semibold">{item.code || '邀请码已失效'}</code>{item.code && <CopyButton text={item.code} label="复制" />}</div>
-                        <p className="mt-2 text-xs text-[var(--muted-foreground)]">{item.used ? '已使用' : '待使用'} · 奖励 {item.rewardPoints} 积分 · 有效期至 {formatShanghaiDateTime(item.expiresAt)}</p>
+                        <p className="mt-2 text-xs text-[var(--muted-foreground)]">{item.status === 'expired' ? '已过期' : item.status === 'disabled' ? '已失效' : item.used ? '已使用' : '可使用'} · 奖励 {item.rewardPoints} 积分 · 有效期至 {formatShanghaiDateTime(item.expiresAt)}</p>
                       </Panel>
                     ))}
                     {!referrals.length && <p className="py-6 text-center text-sm text-[var(--muted-foreground)]">暂无邀请记录。</p>}
@@ -814,6 +908,12 @@ export default function DashboardPage() {
         ]}
       />
 
+      {renewalPreview && (
+        <AccessibleModal title="确认续期" onClose={() => setRenewalPreview(null)} overlayClassName="prompt-overlay" contentClassName="prompt-modal">
+          <p className="leading-7 text-[var(--muted-foreground)]">增加 {renewalPreview.durationDays} 天。当前有效期：{renewalPreview.currentExpiresAt ? formatShanghaiDateTime(renewalPreview.currentExpiresAt) : '永久'}；确认后：{renewalPreview.nextExpiresAt ? formatShanghaiDateTime(renewalPreview.nextExpiresAt) : '永久'}。</p>
+          <div className="mt-6 flex gap-3"><Button variant="secondary" onClick={() => setRenewalPreview(null)}>取消</Button><Button variant="claret" loading={redeeming} onClick={() => void confirmRenewal()}>确认续期</Button></div>
+        </AccessibleModal>
+      )}
       {popup && (
         <PromptModal title={popup.title} body={popup.body} onClose={() => setPopup(null)} />
       )}
@@ -916,6 +1016,7 @@ function ProgressCard({ item }: { item: LibrarySummary['progress'][number] }) {
       <p className="mt-3 text-sm text-[var(--muted-foreground)]">已听 {item.currentHours} 小时 / 共 {item.durationHours} 小时</p>
       <div className="bar-track mt-3"><div className="bar-fill" style={{ width: `${Math.min(Math.max(item.progressPercent, 0), 100)}%` }} /></div>
       <p className="mt-2 text-xs text-[rgba(166,191,202,.72)]">更新：{item.lastUpdate ? formatShanghaiDateTime(item.lastUpdate) : '未知'}</p>
+      {item.openUrl ? <a className="btn btn-secondary mt-4 w-full" href={item.openUrl} target="_blank" rel="noreferrer"><Headphones size={15} /> 继续收听</a> : <p className="mt-3 text-xs text-[var(--muted-foreground)]">请打开媒体客户端继续收听。</p>}
     </Panel>
   );
 }

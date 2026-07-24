@@ -24,10 +24,14 @@ from app.db import get_session
 from app.models import AuditLog, PortalUser, ReconciliationJob, utcnow
 from app.routers.auth import default_abs_permissions, get_abs_client_factory
 from app.security import hash_password
+from app.services.bulk_operations import BulkPreviewError, create_bulk_expiry_preview, validate_bulk_expiry_preview
+from app.services.password_sync import begin_password_sync, retry_password_sync, serialize_password_operation
+from app.services.provisioning import compensate_orphan_abs_user
 from app.services.reconciliation import (
     enqueue_reconciliation_job,
     process_reconciliation_jobs,
 )
+from app.services.usernames import archive_deleted_username, find_username_owner
 
 router = APIRouter(prefix="/api/admin/users", tags=["admin-users"])
 
@@ -61,6 +65,8 @@ class SetExpiryRequest(BaseModel):
 class BulkExpiryRequest(BaseModel):
     extendDays: int = Field(ge=1, le=3650)
     reason: str | None = Field(default=None, max_length=200)
+    previewToken: str = Field(min_length=1, max_length=128)
+    operationId: str = Field(min_length=1, max_length=128)
 
 
 class BulkExpiryPreviewRequest(BaseModel):
@@ -330,10 +336,8 @@ async def create_user(
     if len(payload.password) < _min_password_length():
         raise HTTPException(status_code=422, detail=f"密码至少需要 {_min_password_length()} 位字符。")
 
-    existing = session.exec(
-        select(PortalUser).where(func.lower(PortalUser.username) == payload.username.lower())
-    ).first()
-    if existing and existing.status != "deleted":
+    existing = find_username_owner(session, payload.username)
+    if existing is not None and existing.status != "deleted":
         raise HTTPException(status_code=409, detail="该用户名已存在。")
 
     try:
@@ -348,19 +352,9 @@ async def create_user(
         raise _abs_error() from exc
 
     expires_at = None if payload.durationDays == 0 else utcnow() + timedelta(days=payload.durationDays)
-    if existing is not None:
-        # Revive a previously soft-deleted username on the same row.
-        existing.password_hash = hash_password(payload.password)
-        existing.email = payload.email
-        existing.abs_user_id = abs_user["id"]
-        existing.abs_username = abs_user.get("username", payload.username)
-        existing.sync_normalized_usernames()
-        existing.expires_at = expires_at
-        existing.status = "active"
-        existing.role = "user" if existing.role == "admin" else existing.role
-        existing.updated_at = utcnow()
-        user = existing
-    else:
+    try:
+        if existing is not None:
+            archive_deleted_username(session, existing)
         user = PortalUser(
             username=payload.username,
             password_hash=hash_password(payload.password),
@@ -369,17 +363,21 @@ async def create_user(
             abs_username=abs_user.get("username", payload.username),
             expires_at=expires_at,
         )
-    session.add(user)
-    _audit(session, claims, "admin.user.create", user, {"durationDays": payload.durationDays, "note": payload.note})
-    try:
+        session.add(user)
+        audit_detail = {"durationDays": payload.durationDays, "note": payload.note}
+        if existing is not None:
+            audit_detail["reusedDeletedUserId"] = existing.id
+        _audit(session, claims, "admin.user.create", user, audit_detail)
         session.commit()
     except SQLAlchemyError as exc:
         session.rollback()
-        try:
-            async with abs_factory() as abs_client:
-                await abs_client.delete_user(str(abs_user["id"]))
-        except (httpx.HTTPError, TypeError, RuntimeError, KeyError):
-            pass
+        await compensate_orphan_abs_user(
+            session,
+            abs_factory=abs_factory,
+            abs_user_id=str(abs_user["id"]),
+            username=payload.username,
+            source="admin_create_commit_failure",
+        )
         raise HTTPException(status_code=409, detail="该用户名已存在。") from exc
     session.refresh(user)
     return {"user": _serialize(user, {"isActive": True})}
@@ -399,22 +397,25 @@ async def set_password(
     if len(payload.password) < _min_password_length():
         raise HTTPException(status_code=422, detail=f"密码至少需要 {_min_password_length()} 位字符。")
 
-    if user.abs_user_id:
-        try:
-            async with abs_factory() as abs_client:
-                await abs_client.update_user(user.abs_user_id, {"password": payload.password})
-        except (httpx.HTTPError, TypeError, RuntimeError) as exc:
-            raise _abs_error() from exc
-
-    user.password_hash = hash_password(payload.password)
-    user.password_changed_at = utcnow()
-    user.session_version = int(user.session_version or 0) + 1
-    user.updated_at = utcnow()
-    session.add(user)
-    _audit(session, claims, "admin.user.set_password", user)
-    session.commit()
+    operation = begin_password_sync(
+        session,
+        user,
+        new_password=payload.password,
+        idempotency_key=f"password-admin:{user.id}:{hash_password(payload.password)[:24]}",
+        actor=str(claims.get("username") or "admin"),
+    )
+    operation = await retry_password_sync(
+        session,
+        user,
+        operation=operation,
+        new_password=payload.password,
+        abs_factory=abs_factory,
+    )
     session.refresh(user)
-    return {"user": _serialize(user, None)}
+    return {
+        "user": _serialize(user, None),
+        "passwordOperation": serialize_password_operation(operation),
+    }
 
 
 @router.post("/{user_id}/status")
@@ -470,7 +471,11 @@ async def bulk_extend_expiry_preview(
     session: Session = Depends(get_session),
 ) -> dict[str, Any]:
     users, skipped_admins = _bulk_expiry_candidates(session)
-    return {"summary": _bulk_expiry_preview_summary(users, skipped_admins, payload.extendDays)}
+    preview = create_bulk_expiry_preview(session, extend_days=payload.extendDays)
+    return {
+        "summary": _bulk_expiry_preview_summary(users, skipped_admins, payload.extendDays),
+        **preview,
+    }
 
 
 @router.post("/bulk/expiry")
@@ -480,8 +485,21 @@ async def bulk_extend_expiry(
     session: Session = Depends(get_session),
     abs_factory: Callable[[], AudiobookshelfClient] = Depends(get_abs_client_factory),
 ) -> dict[str, Any]:
-    users, skipped_admins = _bulk_expiry_candidates(session)
-
+    try:
+        users = validate_bulk_expiry_preview(
+            session,
+            preview_token=payload.previewToken,
+            operation_id=payload.operationId,
+            extend_days=payload.extendDays,
+        )
+    except BulkPreviewError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    skipped_admins = session.exec(
+        select(PortalUser).where(
+            PortalUser.status != "deleted",
+            PortalUser.role.in_(["admin", "root"]),
+        )
+    ).all()
     now = utcnow()
     updated: list[PortalUser] = []
     reactivated = 0
@@ -539,6 +557,12 @@ async def bulk_extend_expiry(
             )
         )
     session.commit()
+    from app.models import OperationPreview
+    consumed_preview = session.get(OperationPreview, payload.previewToken)
+    if consumed_preview is not None:
+        consumed_preview.consumed_at = utcnow()
+        session.add(consumed_preview)
+        session.commit()
     synced_jobs = 0
     for job in reactivation_jobs:
         if await _process_reconciliation_now(session, abs_factory, job):

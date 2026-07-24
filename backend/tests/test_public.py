@@ -5,6 +5,8 @@ from sqlmodel import Session, SQLModel, create_engine
 
 from app.db import get_session
 from app.main import app
+from app.models import PortalUser
+from app.security import create_access_token, hash_password
 
 
 @pytest.fixture(autouse=True)
@@ -22,7 +24,7 @@ def isolated_database():
 
     app.dependency_overrides[get_session] = override_session
     try:
-        yield
+        yield engine
     finally:
         app.dependency_overrides.pop(get_session, None)
 
@@ -43,6 +45,43 @@ def test_session_status_is_public_and_quiet_for_anonymous_visits():
 
     assert response.status_code == 200
     assert response.json() == {"authenticated": False, "admin": False}
+
+
+def test_session_status_reports_pending_session_as_authenticated(isolated_database):
+    with Session(isolated_database) as session:
+        user = PortalUser(
+            username="pending-user",
+            abs_username="pending-user",
+            password_hash=hash_password("password"),
+            role="user",
+            status="pending",
+        )
+        session.add(user)
+        session.commit()
+        session.refresh(user)
+        token = create_access_token(subject=user.id, role=user.role)
+
+    client = TestClient(app)
+    client.cookies.set("moyin_session", token)
+    response = client.get("/api/public/session-status")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "authenticated": True,
+        "admin": False,
+        "accountStatus": "pending",
+        "status": "pending",
+        "role": "user",
+    }
+
+
+def test_public_config_exposes_safe_bot_username_for_recovery(monkeypatch):
+    monkeypatch.setenv("TELEGRAM_BOT_USERNAME", "moyindebot")
+
+    response = TestClient(app).get("/api/public/config")
+
+    assert response.status_code == 200
+    assert response.json()["telegram"]["botUsername"] == "moyindebot"
 
 
 def test_public_config_exposes_safe_values_only(monkeypatch):

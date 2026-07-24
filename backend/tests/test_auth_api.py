@@ -6,7 +6,7 @@ from sqlmodel import Session, SQLModel, create_engine, select
 
 from app.db import get_session
 from app.main import app
-from app.models import Code, PortalUser, utcnow
+from app.models import Code, PortalUser, ReconciliationJob, utcnow
 from app.routers.auth import LoginRequest, RegisterRequest, get_abs_client_factory
 from app.routers.me import ChangePasswordRequest
 from app.routers.public import PasswordResetRequest
@@ -78,10 +78,17 @@ def test_registration_password_maximum_is_18_without_breaking_existing_logins():
 
 
 class FakeAbsClient:
-    def __init__(self, *, fail: Exception | None = None):
+    def __init__(
+        self,
+        *,
+        fail: Exception | None = None,
+        fail_delete: Exception | None = None,
+    ):
         self.created = []
+        self.deleted = []
         self.updated = []
         self.fail = fail
+        self.fail_delete = fail_delete
 
     async def __aenter__(self):
         return self
@@ -98,6 +105,12 @@ class FakeAbsClient:
     async def update_user(self, user_id, payload):
         self.updated.append((user_id, payload))
         return {"id": user_id, **payload}
+
+    async def delete_user(self, user_id):
+        if self.fail_delete:
+            raise self.fail_delete
+        self.deleted.append(user_id)
+        return True
 
 
 def make_client(fake_abs: FakeAbsClient | None = None):
@@ -161,6 +174,62 @@ def test_register_with_invite_code_creates_portal_and_abs_user():
         teardown_client()
 
 
+def test_web_registration_reuses_soft_deleted_username_with_a_new_identity():
+    client, engine, fake_abs = make_client()
+    try:
+        with Session(engine) as session:
+            deleted = PortalUser(
+                username="Alice",
+                password_hash="legacy-password-hash",
+                email="legacy@example.com",
+                abs_user_id="abs-old",
+                abs_username="Alice",
+                status="deleted",
+                role="root",
+                telegram_id="legacy-telegram-id",
+            )
+            session.add(deleted)
+            session.add(Code(code="REUSE-DELETED", type="register", duration_days=7))
+            session.commit()
+            session.refresh(deleted)
+            deleted_id = deleted.id
+
+        response = client.post(
+            "/api/auth/register",
+            json={
+                "username": "alice",
+                "password": "StrongPassword-521",
+                "inviteCode": "REUSE-DELETED",
+            },
+        )
+
+        assert response.status_code == 200, response.text
+        replacement_id = response.json()["user"]["id"]
+        assert replacement_id != deleted_id
+        assert fake_abs.created[-1]["username"] == "alice"
+        with Session(engine) as session:
+            archived = session.get(PortalUser, deleted_id)
+            replacement = session.get(PortalUser, replacement_id)
+            code = session.exec(select(Code).where(Code.code == "REUSE-DELETED")).one()
+            assert archived is not None
+            assert archived.username == f"__deleted__:{deleted_id}"
+            assert archived.abs_username == f"__deleted__:{deleted_id}"
+            assert archived.status == "deleted"
+            assert archived.role == "root"
+            assert archived.telegram_id == "legacy-telegram-id"
+            assert archived.email == "legacy@example.com"
+            assert archived.password_hash == "legacy-password-hash"
+            assert replacement is not None
+            assert replacement.username == "alice"
+            assert replacement.role == "user"
+            assert replacement.telegram_id is None
+            assert replacement.email is None
+            assert replacement.status == "pending"
+            assert code.used_count == 1
+    finally:
+        teardown_client()
+
+
 def test_register_accepts_short_password_matching_media_server_policy(monkeypatch):
     monkeypatch.setenv("PORTAL_PASSWORD_MIN_LENGTH", "3")
     client, engine, fake_abs = make_client()
@@ -202,6 +271,44 @@ def test_register_returns_json_error_and_does_not_consume_code_when_upstream_fai
             assert code is not None
             assert code.used_count == 0
             assert redeem_code(session, "UPSTREAM-FAIL", username="charlie", action="register").used_count == 1
+    finally:
+        teardown_client()
+
+
+def test_a08_web_registration_commit_failure_uses_durable_orphan_compensation():
+    fake_abs = FakeAbsClient(fail_delete=RuntimeError("cleanup unavailable"))
+    client, engine, _ = make_client(fake_abs)
+    try:
+        with Session(engine) as session:
+            session.add(Code(code="A08-WEB-INVITE", type="register", duration_days=7))
+            session.add(
+                PortalUser(
+                    username="existing_abs_owner",
+                    password_hash="hash",
+                    abs_user_id="abs-alice",
+                    abs_username="existing_abs_owner",
+                )
+            )
+            session.commit()
+
+        response = client.post(
+            "/api/auth/register",
+            json={
+                "username": "new_a08_web_user",
+                "password": "StrongPassword-521",
+                "inviteCode": "A08-WEB-INVITE",
+            },
+        )
+
+        assert response.status_code == 503, response.text
+        with Session(engine) as session:
+            job = session.exec(
+                select(ReconciliationJob).where(
+                    ReconciliationJob.target_type == "provisioning_orphan",
+                    ReconciliationJob.abs_user_id == "abs-alice",
+                )
+            ).one()
+            assert job.idempotency_key == "provision-cleanup:abs-alice"
     finally:
         teardown_client()
 

@@ -6,11 +6,12 @@ import json
 import secrets
 import string
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 from sqlmodel import Session, select
 
 from app.config import Settings
-from app.models import AuditLog, PortalUser, TelegramBindToken, utcnow
+from app.models import AccountOperation, AuditLog, PortalUser, TelegramBindToken, utcnow
 
 
 class TelegramBindingError(ValueError):
@@ -118,19 +119,37 @@ def bind_telegram_user(
     telegram_id: str,
     telegram_username: str | None,
     settings: Settings | None = None,
+    operation_id: str | None = None,
 ) -> PortalUser:
     settings = settings or Settings()
     normalized_telegram_id = str(telegram_id).strip()
     if not normalized_telegram_id:
         raise TelegramBindingError("telegram id is required")
 
-    existing = get_user_by_telegram_id(session, normalized_telegram_id)
-    if existing is not None:
-        raise TelegramBindingError("telegram account already bound")
-
     token = _find_token_by_code(session, code, settings=settings)
     if token is None:
         raise TelegramBindingError("bind code not found")
+    idempotency_key = (operation_id or "").strip() or f"telegram-bind:{token.id}"
+    replay = session.exec(
+        select(AccountOperation).where(
+            AccountOperation.idempotency_key == idempotency_key
+        )
+    ).first()
+    if replay is not None:
+        if replay.kind != "telegram_binding_activation":
+            raise TelegramBindingError("operation id was already used")
+        replay_user = (
+            session.get(PortalUser, replay.portal_user_id)
+            if replay.portal_user_id
+            else None
+        )
+        if replay_user is None or replay_user.telegram_id != normalized_telegram_id:
+            raise TelegramBindingError("operation id was already used")
+        return replay_user
+
+    existing = get_user_by_telegram_id(session, normalized_telegram_id)
+    if existing is not None:
+        raise TelegramBindingError("telegram account already bound")
 
     max_failures = max(1, int(settings.telegram_bind_code_max_failures))
     if token.failed_attempts >= max_failures:
@@ -153,6 +172,23 @@ def bind_telegram_user(
     token.used_at = utcnow()
     session.add(user)
     session.add(token)
+    operation = AccountOperation(
+        kind="telegram_binding_activation",
+        portal_user_id=user.id,
+        idempotency_key=idempotency_key,
+        phase="binding_saved",
+        request_hash=hashlib.sha256(
+            json.dumps(
+                {
+                    "tokenId": token.id,
+                    "telegramId": normalized_telegram_id,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest(),
+    )
+    session.add(operation)
     _audit(
         session,
         action="telegram.bind",
@@ -162,6 +198,93 @@ def bind_telegram_user(
     session.commit()
     session.refresh(user)
     return user
+
+
+def get_binding_operation(
+    session: Session,
+    user: PortalUser,
+) -> AccountOperation | None:
+    return session.exec(
+        select(AccountOperation)
+        .where(
+            AccountOperation.kind == "telegram_binding_activation",
+            AccountOperation.portal_user_id == user.id,
+        )
+        .order_by(AccountOperation.created_at.desc())
+    ).first()
+
+
+def serialize_binding_operation(operation: AccountOperation) -> dict[str, Any]:
+    return {
+        "operationId": operation.idempotency_key,
+        "phase": operation.phase,
+        "completed": operation.phase == "completed",
+        "retryRequired": operation.phase == "activation_pending",
+        "errorCategory": operation.last_error,
+    }
+
+
+async def activate_binding_operation(
+    session: Session,
+    user: PortalUser,
+    *,
+    operation: AccountOperation,
+    abs_factory: Any,
+) -> AccountOperation:
+    if operation.portal_user_id != user.id or operation.kind != "telegram_binding_activation":
+        raise TelegramBindingError("binding operation does not match user")
+    if operation.phase == "completed":
+        return operation
+    if not user.telegram_binding_required or user.status != "pending":
+        operation.phase = "completed"
+        operation.status = "completed"
+        operation.completed_at = utcnow()
+        operation.updated_at = operation.completed_at
+        operation.result_json = json.dumps(
+            {"status": user.status, "upstreamActivated": True},
+            separators=(",", ":"),
+        )
+        session.add(operation)
+        session.commit()
+        return operation
+
+    if user.abs_user_id:
+        try:
+            async with abs_factory() as abs_client:
+                await abs_client.update_user(user.abs_user_id, {"isActive": True})
+        except Exception as exc:  # noqa: BLE001 - operation remains safely retryable
+            operation.phase = "activation_pending"
+            operation.status = "pending"
+            operation.last_error = type(exc).__name__
+            operation.updated_at = utcnow()
+            session.add(operation)
+            session.commit()
+            session.refresh(operation)
+            return operation
+
+    now = utcnow()
+    if user.expires_at is not None:
+        current_expiry = _aware(user.expires_at)
+        created_at = _aware(user.created_at)
+        if current_expiry is not None:
+            user.expires_at = current_expiry + max(now - created_at, timedelta(0))
+    user.status = "active"
+    user.updated_at = now
+    operation.phase = "completed"
+    operation.status = "completed"
+    operation.last_error = None
+    operation.completed_at = now
+    operation.updated_at = now
+    operation.result_json = json.dumps(
+        {"status": "active", "upstreamActivated": True},
+        separators=(",", ":"),
+    )
+    session.add(user)
+    session.add(operation)
+    session.commit()
+    session.refresh(user)
+    session.refresh(operation)
+    return operation
 
 
 def unbind_telegram_user(session: Session, user: PortalUser) -> PortalUser:
